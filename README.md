@@ -17,7 +17,7 @@ A modern, high-performance, and interactive Python-based Telegram Gateway for th
 
 - Python 3.12+ 
 - Node.js (for Gemini CLI)
-- `@anthropic-ai/gemini-cli` installed globally (`npm install -g @anthropic-ai/gemini-cli`)
+- `@google-gemini/gemini-cli` installed globally (`npm install -g @google/gemini-cli`)
 
 ## Quick Start
 
