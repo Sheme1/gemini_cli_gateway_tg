@@ -15,9 +15,14 @@ class SessionManager:
         self.config = config
         self.process: Optional[asyncio.subprocess.Process] = None
         self.lock = asyncio.Lock()
+        self._master_fd: Optional[int] = None
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
 
     async def spawn(self, resume: bool = False) -> None:
         """Запуск процесса gemini в interactive backend mode."""
+        import os
+        import pty
         args = [
             "gemini",
             "-m",
@@ -33,25 +38,33 @@ class SessionManager:
 
         logger.info(f"Spawning Gemini CLI: {' '.join(args)}")
 
+        master_fd, slave_fd = pty.openpty()
+
         self.process = await asyncio.create_subprocess_exec(
             *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
             cwd=self.config.gemini_working_dir,
+            preexec_fn=os.setsid
         )
 
-        # Читаем начальный вывод (приветствие), чтобы очистить stdout
-        # Запустим фоновую задачу для логирования stderr, чтобы не блокировать pipe
-        asyncio.create_task(self._read_stderr(self.process.stderr))
+        os.close(slave_fd)
 
-    async def _read_stderr(self, stderr: asyncio.StreamReader) -> None:
-        """Логирование ошибок CLI в фоне."""
-        while True:
-            line = await stderr.readline()
-            if not line:
-                break
-            logger.error(f"[CLI STDERR] {line.decode().strip()}")
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, os.fdopen(master_fd, 'rb', buffering=0))
+
+        transport, w_protocol = await loop.connect_write_pipe(
+            asyncio.streams.FlowControlMixin,
+            os.fdopen(os.dup(master_fd), 'wb', buffering=0)
+        )
+        writer = asyncio.StreamWriter(transport, w_protocol, reader, loop)
+
+        self._master_fd = master_fd
+        self._reader = reader
+        self._writer = writer
 
     async def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -67,6 +80,12 @@ class SessionManager:
                 logger.warning("Process did not terminate in time. Killing it.")
                 self.process.kill()
                 await self.process.wait()
+                
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+        self._reader = None
+        self._master_fd = None
         self.process = None
 
     async def reset(self) -> None:
@@ -89,13 +108,13 @@ class SessionManager:
 
             logger.info(f"Sending prompt to process: {prompt[:50]}...")
 
-            # Пишем в stdin
-            self.process.stdin.write(f"{prompt}\n".encode("utf-8"))
-            await self.process.stdin.drain()
+            # Пишем в stdin через PTY writer
+            self._writer.write(f"{prompt}\n".encode("utf-8"))
+            await self._writer.drain()
 
-            # Читаем stdout пока не получим event.is_done
+            # Читаем stdout логи пока не получим event.is_done
             while True:
-                line = await self.process.stdout.readline()
+                line = await self._reader.readline()
                 if not line:
                     logger.warning("Process EOF on stdout. Did it crash?")
                     # Процесс мог упасть
@@ -122,5 +141,5 @@ class SessionManager:
         async with self.lock:
             if await self.is_alive():
                 logger.info(f"Sending approval answer: {answer}")
-                self.process.stdin.write(f"{answer}\n".encode("utf-8"))
-                await self.process.stdin.drain()
+                self._writer.write(f"{answer}\n".encode("utf-8"))
+                await self._writer.drain()

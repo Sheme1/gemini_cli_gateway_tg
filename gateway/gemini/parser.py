@@ -26,8 +26,10 @@ class GeminiStreamParser:
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
-            # Fallback для не-JSON строк (иногда CLI может плюнуть ошибку текстом)
-            return StreamEvent(text_chunk=f"\n{line}\n")
+            # Поскольку мы запускаем PTY-эмулятор, на выход попадает шелуха вроде рамок "──────────"
+            # и промтов "?". Поэтому игнорируем любые не-JSON строки, чтобы не спамить в Telegram.
+            logger.debug(f"Ignored non-json PTY line: {line!r}")
+            return StreamEvent()
 
         event = StreamEvent()
 
