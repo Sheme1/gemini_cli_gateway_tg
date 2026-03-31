@@ -1,3 +1,11 @@
 .env
 GEMINI.md
 imp.md
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd

@@ -42,12 +42,12 @@ class StreamEditor:
         msg = await self.bot.send_message(chat_id=self.chat_id, text=initial_text)
         self.current_message_id = msg.message_id
         self.last_sent_text = initial_text
-        self.text_buffer = "" # очищаем после успешной отправки
+        self.text_buffer = ""  # очищаем после успешной отправки
 
     async def append_text(self, text_chunk: str) -> None:
         """Добавляет текст в буфер и планирует обновление, если нужно."""
         self.text_buffer += text_chunk
-        
+
         # Если превысили лимит Телеграма, нужно переключиться на новое сообщение
         if len(self.last_sent_text) + len(self.text_buffer) >= self.max_length:
             await self._flush_and_split()
@@ -67,12 +67,11 @@ class StreamEditor:
         # Отправляем новое сообщение с остатком
         if self.text_buffer:
             msg = await self.bot.send_message(
-                chat_id=self.chat_id, 
-                text=self.text_buffer[:self.max_length]
+                chat_id=self.chat_id, text=self.text_buffer[: self.max_length]
             )
             self.current_message_id = msg.message_id
-            self.last_sent_text = self.text_buffer[:self.max_length]
-            self.text_buffer = self.text_buffer[self.max_length:]
+            self.last_sent_text = self.text_buffer[: self.max_length]
+            self.text_buffer = self.text_buffer[self.max_length :]
 
     async def _throttled_update(self) -> None:
         """Обновляет сообщение не чаще чем раз в self.interval."""
@@ -94,29 +93,29 @@ class StreamEditor:
         """Вызов editMessageText с обработкой 'message is not modified'."""
         if not self.current_message_id:
             return False
-            
+
         try:
             await self.bot.edit_message_text(
                 chat_id=self.chat_id,
                 message_id=self.current_message_id,
                 text=text,
-                parse_mode=None # На этапе стриминга лучше без парсера ломающего частичный маркдаун
+                parse_mode=None,  # На этапе стриминга лучше без парсера ломающего частичный маркдаун
             )
             return True
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
-                return True # Игнорируем, это не ошибка
+                return True  # Игнорируем, это не ошибка
             logger.warning(f"Error editing message: {e}")
             return False
 
     async def flush(self) -> None:
         """Принудительно отправляет всё, что осталось в буфере (вызывать в конце)."""
         self.is_flushing = True
-        
+
         # Отменяем ждущий апдейт
         if self.last_update_task and not self.last_update_task.done():
             self.last_update_task.cancel()
-            
+
         while self.text_buffer:
             full_text = self.last_sent_text + self.text_buffer
             if len(full_text) > self.max_length:
@@ -125,5 +124,5 @@ class StreamEditor:
                 await self._raw_edit(full_text)
                 self.last_sent_text = full_text
                 self.text_buffer = ""
-        
+
         self.is_flushing = False

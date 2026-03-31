@@ -70,9 +70,7 @@ class Config:
             gemini_approval_mode=os.getenv(
                 "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
             ),
-            gemini_working_dir=os.getenv(
-                "GEMINI_WORKING_DIR", str(Path.home())
-            ),
+            gemini_working_dir=os.getenv("GEMINI_WORKING_DIR", str(Path.home())),
             gemini_cli_timeout=int(
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
             ),

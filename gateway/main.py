@@ -13,6 +13,7 @@ from gateway.gemini.session import SessionManager
 
 logger = logging.getLogger(__name__)
 
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -34,22 +35,24 @@ async def main() -> None:
 
     # Инициализация SessionManager
     session_manager = SessionManager(config=config)
-    
+
     # Регистрация меню команд
-    await bot.set_my_commands([
-        {"command": "start", "description": "Запуск бота / Главное меню"},
-        {"command": "new", "description": "🔄 Новый диалог (сброс контекста)"},
-        {"command": "model", "description": "Выбрать модель Gemini"},
-        {"command": "settings", "description": "Настройки Gemini CLI"},
-        {"command": "status", "description": "Статус сессии Gemini"},
-        {"command": "help", "description": "Справка"},
-    ])
+    await bot.set_my_commands(
+        [
+            {"command": "start", "description": "Запуск бота / Главное меню"},
+            {"command": "new", "description": "🔄 Новый диалог (сброс контекста)"},
+            {"command": "model", "description": "Выбрать модель Gemini"},
+            {"command": "settings", "description": "Настройки Gemini CLI"},
+            {"command": "status", "description": "Статус сессии Gemini"},
+            {"command": "help", "description": "Справка"},
+        ]
+    )
 
     dp = Dispatcher(
         session_manager=session_manager,
         config=config,
     )
-    
+
     # Регистрация middlewares
     auth_middleware = AuthMiddleware(target_chat_id=config.target_chat_id)
     dp.message.middleware(auth_middleware)
