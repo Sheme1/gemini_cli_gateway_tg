@@ -63,6 +63,15 @@ class Config:
         sandbox_raw = os.getenv("GEMINI_SANDBOX", "false").strip().lower()
         sandbox = sandbox_raw in ("true", "1", "yes")
 
+        # Парсинг GEMINI_WORKING_DIR
+        working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
+        working_dir = Path(working_dir_raw).expanduser().resolve() if working_dir_raw else Path.home()
+        if not working_dir.exists() or not working_dir.is_dir():
+            raise ValueError(
+                f"Директория GEMINI_WORKING_DIR='{working_dir}' не существует "
+                "или не является папкой. Проверьте настройки в .env файле."
+            )
+
         return cls(
             telegram_bot_token=token,
             target_chat_id=target_chat_id,
@@ -70,7 +79,7 @@ class Config:
             gemini_approval_mode=os.getenv(
                 "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
             ),
-            gemini_working_dir=os.getenv("GEMINI_WORKING_DIR", str(Path.home())),
+            gemini_working_dir=str(working_dir),
             gemini_cli_timeout=int(
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
             ),

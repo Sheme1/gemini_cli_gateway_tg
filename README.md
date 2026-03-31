@@ -29,7 +29,7 @@ A modern, high-performance, and interactive Python-based Telegram Gateway for th
 
 2. **Set up the virtual environment & install dependencies:**
    ```bash
-   python -m venv .venv
+   python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
