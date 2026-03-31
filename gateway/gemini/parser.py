@@ -23,12 +23,20 @@ class GeminiStreamParser:
         if not line.strip():
             return StreamEvent()
 
+        import re
+        # Очистка от ANSI escape-кодов (цвета, управление курсором оболочки)
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        clean_line = ansi_escape.sub('', line).strip()
+        
+        if not clean_line:
+            return StreamEvent()
+
         try:
-            data = json.loads(line)
+            data = json.loads(clean_line)
         except json.JSONDecodeError:
-            # Поскольку мы запускаем PTY-эмулятор, на выход попадает шелуха вроде рамок "──────────"
-            # и промтов "?". Поэтому игнорируем любые не-JSON строки, чтобы не спамить в Telegram.
-            logger.debug(f"Ignored non-json PTY line: {line!r}")
+            # Изменили на logger.warning, чтобы пользователь сейчас увидел в консоли,
+            # что именно выдает gemini CLI в PTY-режиме:
+            logger.warning(f"[PTY RAW NON-JSON] {clean_line!r}")
             return StreamEvent()
 
         event = StreamEvent()
