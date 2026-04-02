@@ -77,6 +77,7 @@ async def voice_handler(
             chat_id=chat_id,
             message_id=msg.message_id,
             text="🎙 <i>Распознаю речь (Gemini API)...</i>",
+            parse_mode="HTML",
         )
 
         # Транскрибируем
@@ -102,6 +103,7 @@ async def voice_handler(
         # Подключаемся к существующему сообщению
         streamer.current_message_id = msg.message_id
         streamer.last_sent_text = prompt_info
+        streamer._first_chunk = False  # Не заменяем, а дописываем к транскрибации
 
         async def on_chunk(text: str) -> None:
             await streamer.append_text(text)
@@ -121,7 +123,10 @@ async def voice_handler(
             )
 
         await session_manager.send_prompt(
-            prompt=transcription, on_chunk=on_chunk, on_approval=on_approval
+            prompt=transcription,
+            user_id=message.from_user.id,
+            on_chunk=on_chunk,
+            on_approval=on_approval,
         )
         await streamer.flush()
 

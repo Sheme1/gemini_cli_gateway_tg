@@ -2,6 +2,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from html import escape as html_escape
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -68,27 +69,32 @@ class GeminiStreamParser:
             content = data.get("content", "")
 
             if role == "assistant" and content:
-                event.text_chunk = content
-            # Сообщения от user — пропускаем (это эхо промпта)
+                # Экранируем HTML-спецсимволы из текста Gemini,
+                # чтобы не ломать Telegram parse_mode=HTML
+                event.text_chunk = html_escape(content)
             return event
 
         # === tool_use: вызов инструмента ===
         if event_type == "tool_use":
-            tool_name = data.get("name", "unknown")
+            tool_name = html_escape(data.get("name", "unknown"))
             args = data.get("args", {})
-            # Показываем пользователю что Gemini вызывает инструмент
-            args_preview = json.dumps(args, ensure_ascii=False)
+            args_preview = html_escape(json.dumps(args, ensure_ascii=False))
             if len(args_preview) > 200:
                 args_preview = args_preview[:200] + "..."
-            event.text_chunk = f"\n\n🔧 <b>Инструмент:</b> <code>{tool_name}</code>\n<pre>{args_preview}</pre>\n"
+            event.text_chunk = (
+                f"\n\n🔧 <b>{tool_name}</b>\n"
+                f"<pre>{args_preview}</pre>\n"
+            )
             return event
 
         # === tool_result: результат инструмента ===
         if event_type == "tool_result":
             output = data.get("output", "")
             if output:
-                preview = output[:500] + "..." if len(output) > 500 else output
-                event.text_chunk = f"\n📋 <i>Результат:</i>\n<pre>{preview}</pre>\n"
+                preview = html_escape(
+                    output[:500] + "..." if len(output) > 500 else output
+                )
+                event.text_chunk = f"\n📋 <pre>{preview}</pre>\n"
             return event
 
         # === result: завершение ===
@@ -99,17 +105,16 @@ class GeminiStreamParser:
             duration = stats.get("duration_ms", 0)
             if total or duration:
                 event.text_chunk = (
-                    f"\n\n📊 <i>Токены: {total} | "
-                    f"Время: {duration / 1000:.1f}с</i>"
+                    f"\n\n📊 <i>Токены: {total} · "
+                    f"{duration / 1000:.1f}с</i>"
                 )
             return event
 
         # === error: ошибка ===
         if event_type == "error":
-            error_msg = data.get("message", "Неизвестная ошибка")
+            error_msg = html_escape(data.get("message", "Неизвестная ошибка"))
             event.text_chunk = f"\n\n⚠️ <b>Ошибка:</b> {error_msg}"
             return event
 
-        # Неизвестный тип — логируем для отладки
         logger.debug(f"[UNKNOWN EVENT] type={event_type}, data={data}")
         return event

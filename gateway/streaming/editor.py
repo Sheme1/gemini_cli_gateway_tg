@@ -35,17 +35,27 @@ class StreamEditor:
         self.last_sent_text = ""
         self.last_update_task: Optional[asyncio.Task] = None
         self.is_flushing = False
+        self._first_chunk = True  # Флаг: ещё не было реального текста
 
-    async def initialize(self, initial_text: str = "⏳ Генерирую ответ...") -> None:
-        """Отправляет первое сообщение, которое будет обновляться."""
-        self.text_buffer = initial_text
-        msg = await self.bot.send_message(chat_id=self.chat_id, text=initial_text)
+    async def initialize(self, initial_text: str = "⏳ <i>Генерирую ответ...</i>") -> None:
+        """Отправляет первое сообщение-плейсхолдер, которое будет обновлено."""
+        msg = await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=initial_text,
+            parse_mode="HTML",
+        )
         self.current_message_id = msg.message_id
         self.last_sent_text = initial_text
-        self.text_buffer = ""  # очищаем после успешной отправки
+        self.text_buffer = ""
+        self._first_chunk = True
 
     async def append_text(self, text_chunk: str) -> None:
         """Добавляет текст в буфер и планирует обновление, если нужно."""
+        # При первом чанке — заменяем плейсхолдер, а не дописываем к нему
+        if self._first_chunk:
+            self._first_chunk = False
+            self.last_sent_text = ""
+
         self.text_buffer += text_chunk
 
         # Если превысили лимит Телеграма, нужно переключиться на новое сообщение
@@ -67,7 +77,9 @@ class StreamEditor:
         # Отправляем новое сообщение с остатком
         if self.text_buffer:
             msg = await self.bot.send_message(
-                chat_id=self.chat_id, text=self.text_buffer[: self.max_length]
+                chat_id=self.chat_id,
+                text=self.text_buffer[: self.max_length],
+                parse_mode="HTML",
             )
             self.current_message_id = msg.message_id
             self.last_sent_text = self.text_buffer[: self.max_length]
@@ -90,7 +102,7 @@ class StreamEditor:
             self.text_buffer = ""
 
     async def _raw_edit(self, text: str) -> bool:
-        """Вызов editMessageText с обработкой 'message is not modified'."""
+        """Вызов editMessageText с parse_mode=HTML."""
         if not self.current_message_id:
             return False
 
@@ -99,12 +111,25 @@ class StreamEditor:
                 chat_id=self.chat_id,
                 message_id=self.current_message_id,
                 text=text,
-                parse_mode=None,  # На этапе стриминга лучше без парсера ломающего частичный маркдаун
+                parse_mode="HTML",
             )
             return True
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
                 return True  # Игнорируем, это не ошибка
+            if "can't parse entities" in str(e).lower():
+                # Fallback: если HTML невалидный, шлём без парсинга
+                logger.warning(f"HTML parse failed, fallback to plain text: {e}")
+                try:
+                    await self.bot.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=self.current_message_id,
+                        text=text,
+                        parse_mode=None,
+                    )
+                    return True
+                except TelegramBadRequest:
+                    return False
             logger.warning(f"Error editing message: {e}")
             return False
 
