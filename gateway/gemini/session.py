@@ -1,6 +1,6 @@
 import asyncio
-import logging
 import json
+import logging
 import re
 from typing import Callable
 
@@ -17,14 +17,13 @@ class SessionManager:
         self.config = config
         # user_id -> gemini_session_id
         self.active_sessions: dict[int, str] = {}
-        self.is_alive_process = False
 
     async def get_sessions_list(self) -> list[tuple[str, str]]:
         """Возвращает актуальный список сессий: список кортежей (id, описание)."""
         process = await asyncio.create_subprocess_exec(
             "gemini", "--list-sessions",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.gemini_working_dir
         )
         stdout, _ = await process.communicate()
@@ -53,13 +52,9 @@ class SessionManager:
         return sessions
 
     async def is_alive(self) -> bool:
-        # Для совместимости с handlers, которые ожидают этот метод.
-        # Поскольку процессы теперь одноразовые, всегда возвращаем True,
-        # так как сервис концептуально "жив" и готов к запросам.
         return True
 
     async def kill(self) -> None:
-        # Для совместимости. Теперь процессы убиваются сами.
         pass
 
     async def reset(self, user_id: int) -> None:
@@ -101,43 +96,69 @@ class SessionManager:
         process = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,  # Отбрасываем stderr — избегаем deadlock
             cwd=self.config.gemini_working_dir,
         )
 
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
+        timeout = self.config.gemini_cli_timeout
 
-            line_text = line.decode("utf-8").strip()
-            
-            # Попытка парсинга sessionId на лету для новых сессий 
-            # (если мы не задавали --resume, CLI создаст новую сессию и вернет метаданные)
-            try:
-                data = json.loads(line_text)
-                if "sessionId" in data and not session_id:
-                    # Захватываем новосозданный sessionId
-                    self.active_sessions[user_id] = data["sessionId"]
-                    logger.info(f"Captured new session ID: {data['sessionId']} for user {user_id}")
-            except Exception:
-                pass
+        try:
+            while True:
+                try:
+                    line_bytes = await asyncio.wait_for(
+                        process.stdout.readline(),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Gemini CLI таймаут ({timeout}с) — убиваем процесс"
+                    )
+                    process.kill()
+                    await on_chunk(
+                        f"\n\n⚠️ Таймаут: Gemini не ответил за {timeout} секунд."
+                    )
+                    break
 
-            event = GeminiStreamParser.parse_line(line_text)
+                if not line_bytes:
+                    # EOF — процесс завершился
+                    break
 
-            if event.text_chunk:
-                await on_chunk(event.text_chunk)
+                line_text = line_bytes.decode("utf-8").strip()
+                if not line_text:
+                    continue
 
-            if event.approval_request:
-                await on_approval(event.approval_request)
-                # Headless процесс при запросе интерактивного подтверждения просто прерывается.
-                # Если нужна сложная обработка аппрувов - нужен полноценный daemon или TTY.
-                break
+                logger.debug(f"[GEMINI RAW] {line_text}")
 
-        await process.wait()
+                event = GeminiStreamParser.parse_line(line_text)
+
+                # Захват session_id из init-события
+                if event.session_id and not session_id:
+                    self.active_sessions[user_id] = event.session_id
+                    logger.info(
+                        f"Captured session_id: {event.session_id} "
+                        f"for user {user_id}"
+                    )
+
+                if event.text_chunk:
+                    await on_chunk(event.text_chunk)
+
+                if event.approval_request:
+                    await on_approval(event.approval_request)
+                    break
+
+                if event.is_done and not event.text_chunk:
+                    # result без текста (статистика уже отправлена если была)
+                    break
+
+        finally:
+            # Гарантируем что процесс завершён
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
     async def answer_approval(self, answer: str) -> None:
         # Заглушка. Headless режим не поддерживает интерактивный ввод.
-        # Следует использовать --yolo.
         pass
-
