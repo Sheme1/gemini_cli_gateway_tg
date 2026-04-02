@@ -63,16 +63,12 @@ async def main() -> None:
     dp.include_router(messages.router)
     dp.include_router(voice.router)
 
-    # Поднимаем первый процесс при старте, чтобы не было cold start
-    # Выключаем resume, чтобы не потянул неизвестный стейт
-    await session_manager.spawn(resume=False)
-
     logger.info("Bot started. Listening for messages...")
     try:
         await dp.start_polling(bot)
     finally:
-        logger.info("Bot stopped. Terminating gemini process...")
-        await session_manager.kill()
+        logger.info("Bot stopped.")
+        await bot.session.close()
 
 
 if __name__ == "__main__":
