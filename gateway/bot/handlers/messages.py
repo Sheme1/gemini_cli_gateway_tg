@@ -67,7 +67,10 @@ async def message_handler(
 
     try:
         await session_manager.send_prompt(
-            prompt=prompt, on_chunk=on_chunk, on_approval=on_approval
+            prompt=prompt, 
+            user_id=message.from_user.id,
+            on_chunk=on_chunk, 
+            on_approval=on_approval
         )
     except Exception as e:
         logger.error(f"Ошибка при процессинге промпта: {e}", exc_info=True)

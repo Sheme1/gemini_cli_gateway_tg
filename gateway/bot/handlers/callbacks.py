@@ -24,21 +24,35 @@ async def callback_model(
         await callback.answer("Эта модель уже выбрана", show_alert=True)
         return
 
-    # В идеале нужно обновлять config, но config у нас frozen.
-    # Так как мы не используем БД для настроек пока, мы можем сделать
-    # хак и изменить объект config (хак для dataclass).
-    # Для продакшена нужно State/DB, но пока модифицируем `__dict__`.
     object.__setattr__(config, "gemini_model", new_model)
 
     await callback.message.edit_text(
-        f"🔄 Модель изменена на <b>{new_model}</b>.\nПерезапускаю процесс...",
-        reply_markup=None,  # убираем клавиатуру
+        f"🔄 Модель изменена на <b>{new_model}</b>.\nТекущий диалог сброшен.",
+        reply_markup=None,
     )
 
-    await session_manager.reset()
+    await session_manager.reset(callback.from_user.id)
     await callback.message.answer("✅ Готово! Контекст очищен, новая модель применена.")
     await callback.answer()
 
+
+# ======================== Sessions ========================
+
+@router.callback_query(F.data.startswith("resume_"))
+async def callback_resume_session(
+    callback: CallbackQuery, session_manager: SessionManager
+) -> None:
+    """Выбор старой сессии из списка /sessions."""
+    session_id = callback.data.split("resume_")[1]
+    
+    await session_manager.set_active_session(callback.from_user.id, session_id)
+    
+    await callback.message.edit_text(
+        f"✅ <b>Сессия выбрана:</b> <code>{session_id}</code>\n"
+        f"Все последующие запросы будут отправлены в этот контекст.",
+        reply_markup=None
+    )
+    await callback.answer()
 
 # ======================== Approval ========================
 
@@ -50,18 +64,13 @@ async def callback_interactive_approve(
     """Ответ на интерактивный аппрув от Gemini."""
     action = callback.data.split(":")[1]
 
-    # action может быть 'yes', 'no', 'yolo'
-    # TODO: если yolo, нужно перезапустить сессию с --yolo
-    # Но пока отправляем 'yes'
     if action == "yolo":
-        # Костыль для YOLO (пока просто да)
         answer = "yes"
     else:
         answer = action
 
     await session_manager.answer_approval(answer)
 
-    # Редактируем сообщение, чтобы убрать кнопки
     await callback.message.edit_reply_markup(reply_markup=None)
 
     if answer == "yes":
@@ -117,9 +126,9 @@ async def callback_set_approval(
     object.__setattr__(config, "gemini_approval_mode", new_mode)
 
     await callback.message.edit_text(
-        f"🔄 Режим установлен: <b>{new_mode}</b>.\nПерезапускаю процесс...",
+        f"🔄 Режим установлен: <b>{new_mode}</b>.\nТекущий диалог сброшен.",
         reply_markup=None,
     )
-    await session_manager.reset()
+    await session_manager.reset(callback.from_user.id)
     await callback.message.answer("✅ Готово. Новый режим применен.")
     await callback.answer()

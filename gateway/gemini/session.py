@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from typing import Callable, Optional
+import json
+import re
+from typing import Callable
 
 from gateway.config import Config
 from gateway.gemini.parser import GeminiStreamParser
@@ -9,137 +11,133 @@ logger = logging.getLogger(__name__)
 
 
 class SessionManager:
-    """Управляет одним постоянным процессом Gemini CLI для сохранения контекста."""
+    """Управляет сессиями Gemini CLI."""
 
     def __init__(self, config: Config):
         self.config = config
-        self.process: Optional[asyncio.subprocess.Process] = None
-        self.lock = asyncio.Lock()
-        self._master_fd: Optional[int] = None
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
+        # user_id -> gemini_session_id
+        self.active_sessions: dict[int, str] = {}
+        self.is_alive_process = False
 
-    async def spawn(self, resume: bool = False) -> None:
-        """Запуск процесса gemini в interactive backend mode."""
-        import os
-        import pty
+    async def get_sessions_list(self) -> list[tuple[str, str]]:
+        """Возвращает актуальный список сессий: список кортежей (id, описание)."""
+        process = await asyncio.create_subprocess_exec(
+            "gemini", "--list-sessions",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.config.gemini_working_dir
+        )
+        stdout, _ = await process.communicate()
+        lines = stdout.decode("utf-8").splitlines()
+        
+        sessions = []
+        for line in lines:
+            line = line.strip()
+            # Пропускаем логи и пустые строки
+            if (not line or "No previous" in line or "Keychain" in line 
+                or "Loaded" in line or "Using" in line):
+                continue
+                
+            # Формат вывода --list-sessions обычно содержит индекс/ID и текст
+            match = re.search(r"^\s*([a-zA-Z0-9\-]+)\s+(.+)$", line)
+            if match:
+                session_id = match.group(1)
+                desc = match.group(2)[:60] + "..." if len(match.group(2)) > 60 else match.group(2)
+                sessions.append((session_id, desc))
+            else:
+                parts = line.split(maxsplit=1)
+                if len(parts) >= 1:
+                    session_id = parts[0]
+                    desc = parts[1][:60] + "..." if len(parts) > 1 else "Без описания"
+                    sessions.append((session_id, desc))
+        return sessions
+
+    async def is_alive(self) -> bool:
+        # Для совместимости с handlers, которые ожидают этот метод.
+        # Поскольку процессы теперь одноразовые, всегда возвращаем True,
+        # так как сервис концептуально "жив" и готов к запросам.
+        return True
+
+    async def kill(self) -> None:
+        # Для совместимости. Теперь процессы убиваются сами.
+        pass
+
+    async def reset(self, user_id: int) -> None:
+        """Сброс контекста (/new): очистка привязанного session_id."""
+        if user_id in self.active_sessions:
+            del self.active_sessions[user_id]
+            logger.info(f"Cleared session context for user {user_id}")
+
+    async def set_active_session(self, user_id: int, session_id: str) -> None:
+        self.active_sessions[user_id] = session_id
+        logger.info(f"Set active session {session_id} for user {user_id}")
+
+    async def send_prompt(
+        self,
+        prompt: str,
+        user_id: int,
+        on_chunk: Callable[[str], asyncio.Future],
+        on_approval: Callable[[dict], asyncio.Future],
+    ) -> None:
+        """Отправить промпт в одноразовый процесс и стримить ответ."""
         args = [
             "gemini",
             "-m",
             self.config.gemini_model,
             "-o",
             "stream-json",
+            "-p",
+            prompt,
         ]
         args.extend(self.config.approval_mode_flag)
         args.extend(self.config.sandbox_flag)
 
-        if resume:
-            args.extend(["--resume", "latest"])
+        session_id = self.active_sessions.get(user_id)
+        if session_id:
+            args.extend(["--resume", session_id])
 
-        logger.info(f"Spawning Gemini CLI: {' '.join(args)}")
+        logger.info(f"Spawning Gemini: {' '.join(args)}")
 
-        master_fd, slave_fd = pty.openpty()
-
-        self.process = await asyncio.create_subprocess_exec(
+        process = await asyncio.create_subprocess_exec(
             *args,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             cwd=self.config.gemini_working_dir,
-            preexec_fn=os.setsid
         )
 
-        os.close(slave_fd)
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
 
-        loop = asyncio.get_running_loop()
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await loop.connect_read_pipe(lambda: protocol, os.fdopen(master_fd, 'rb', buffering=0))
-
-        transport, w_protocol = await loop.connect_write_pipe(
-            asyncio.streams.FlowControlMixin,
-            os.fdopen(os.dup(master_fd), 'wb', buffering=0)
-        )
-        writer = asyncio.StreamWriter(transport, w_protocol, reader, loop)
-
-        self._master_fd = master_fd
-        self._reader = reader
-        self._writer = writer
-
-    async def is_alive(self) -> bool:
-        return self.process is not None and self.process.returncode is None
-
-    async def kill(self) -> None:
-        """Завершить текущий процесс."""
-        if await self.is_alive():
-            logger.info("Terminating current gemini process...")
-            self.process.terminate()
+            line_text = line.decode("utf-8").strip()
+            
+            # Попытка парсинга sessionId на лету для новых сессий 
+            # (если мы не задавали --resume, CLI создаст новую сессию и вернет метаданные)
             try:
-                await asyncio.wait_for(self.process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Process did not terminate in time. Killing it.")
-                self.process.kill()
-                await self.process.wait()
-                
-        if self._writer is not None:
-            self._writer.close()
-            self._writer = None
-        self._reader = None
-        self._master_fd = None
-        self.process = None
+                data = json.loads(line_text)
+                if "sessionId" in data and not session_id:
+                    # Захватываем новосозданный sessionId
+                    self.active_sessions[user_id] = data["sessionId"]
+                    logger.info(f"Captured new session ID: {data['sessionId']} for user {user_id}")
+            except Exception:
+                pass
 
-    async def reset(self) -> None:
-        """Сброс контекста (/new): убить процесс и запустить новый."""
-        async with self.lock:
-            await self.kill()
-            await self.spawn(resume=False)
+            event = GeminiStreamParser.parse_line(line_text)
 
-    async def send_prompt(
-        self,
-        prompt: str,
-        on_chunk: Callable[[str], asyncio.Future],
-        on_approval: Callable[[dict], asyncio.Future],
-    ) -> None:
-        """Отправить промпт в процесс и стримить ответ через обратные вызовы."""
-        async with self.lock:
-            if not await self.is_alive():
-                logger.info("Process is dead or not started. Spawning new one.")
-                await self.spawn()
+            if event.text_chunk:
+                await on_chunk(event.text_chunk)
 
-            logger.info(f"Sending prompt to process: {prompt[:50]}...")
+            if event.approval_request:
+                await on_approval(event.approval_request)
+                # Headless процесс при запросе интерактивного подтверждения просто прерывается.
+                # Если нужна сложная обработка аппрувов - нужен полноценный daemon или TTY.
+                break
 
-            # Пишем в stdin через PTY writer
-            self._writer.write(f"{prompt}\n".encode("utf-8"))
-            await self._writer.drain()
-
-            # Читаем stdout логи пока не получим event.is_done
-            while True:
-                line = await self._reader.readline()
-                if not line:
-                    logger.warning("Process EOF on stdout. Did it crash?")
-                    # Процесс мог упасть
-                    await self.kill()
-                    break
-
-                line_text = line.decode("utf-8").strip()
-                event = GeminiStreamParser.parse_line(line_text)
-
-                if event.text_chunk:
-                    await on_chunk(event.text_chunk)
-
-                if event.approval_request:
-                    await on_approval(event.approval_request)
-                    # Обычно после запроса аппрува CLI ждет ввода 'yes' или 'no'
-                    break  # Выходим из цикла чтения, ждем действия пользователя
-
-                if event.is_done:
-                    # Ответ закончен
-                    break
+        await process.wait()
 
     async def answer_approval(self, answer: str) -> None:
-        """Ответить на запрос подтверждения (yes/no/yolo)."""
-        async with self.lock:
-            if await self.is_alive():
-                logger.info(f"Sending approval answer: {answer}")
-                self._writer.write(f"{answer}\n".encode("utf-8"))
-                await self._writer.drain()
+        # Заглушка. Headless режим не поддерживает интерактивный ввод.
+        # Следует использовать --yolo.
+        pass
+
