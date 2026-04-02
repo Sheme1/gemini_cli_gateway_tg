@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import re
 from typing import Callable
@@ -21,27 +20,37 @@ class SessionManager:
     async def get_sessions_list(self) -> list[tuple[str, str]]:
         """Возвращает актуальный список сессий: список кортежей (id, описание)."""
         process = await asyncio.create_subprocess_exec(
-            "gemini", "--list-sessions",
+            "gemini",
+            "--list-sessions",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            cwd=self.config.gemini_working_dir
+            cwd=self.config.gemini_working_dir,
         )
         stdout, _ = await process.communicate()
         lines = stdout.decode("utf-8").splitlines()
-        
+
         sessions = []
         for line in lines:
             line = line.strip()
             # Пропускаем логи и пустые строки
-            if (not line or "No previous" in line or "Keychain" in line 
-                or "Loaded" in line or "Using" in line):
+            if (
+                not line
+                or "No previous" in line
+                or "Keychain" in line
+                or "Loaded" in line
+                or "Using" in line
+            ):
                 continue
-                
+
             # Формат вывода --list-sessions обычно содержит индекс/ID и текст
             match = re.search(r"^\s*([a-zA-Z0-9\-]+)\s+(.+)$", line)
             if match:
                 session_id = match.group(1)
-                desc = match.group(2)[:60] + "..." if len(match.group(2)) > 60 else match.group(2)
+                desc = (
+                    match.group(2)[:60] + "..."
+                    if len(match.group(2)) > 60
+                    else match.group(2)
+                )
                 sessions.append((session_id, desc))
             else:
                 parts = line.split(maxsplit=1)
@@ -110,9 +119,7 @@ class SessionManager:
                         timeout=timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning(
-                        f"Gemini CLI таймаут ({timeout}с) — убиваем процесс"
-                    )
+                    logger.warning(f"Gemini CLI таймаут ({timeout}с) — убиваем процесс")
                     process.kill()
                     await on_chunk(
                         f"\n\n⚠️ Таймаут: Gemini не ответил за {timeout} секунд."
@@ -135,8 +142,7 @@ class SessionManager:
                 if event.session_id and not session_id:
                     self.active_sessions[user_id] = event.session_id
                     logger.info(
-                        f"Captured session_id: {event.session_id} "
-                        f"for user {user_id}"
+                        f"Captured session_id: {event.session_id} for user {user_id}"
                     )
 
                 if event.text_chunk:
