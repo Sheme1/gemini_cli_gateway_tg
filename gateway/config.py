@@ -21,7 +21,7 @@ class Config:
     target_chat_id: Optional[int] = None
 
     # === Gemini CLI ===
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3-flash-preview"
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
     gemini_cli_timeout: int = 300  # секунды
@@ -65,7 +65,11 @@ class Config:
 
         # Парсинг GEMINI_WORKING_DIR
         working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
-        working_dir = Path(working_dir_raw).expanduser().resolve() if working_dir_raw else Path.home()
+        working_dir = (
+            Path(working_dir_raw).expanduser().resolve()
+            if working_dir_raw
+            else Path.home()
+        )
         if not working_dir.exists() or not working_dir.is_dir():
             raise ValueError(
                 f"Директория GEMINI_WORKING_DIR='{working_dir}' не существует "
