@@ -154,61 +154,61 @@ LOG_LEVEL=INFO                              # DEBUG / INFO / WARNING / ERROR
 
 Systemd ensures the bot starts automatically on boot and restarts on failure.
 
-#### Автоматическая установка (рекомендуется)
+#### Automatic Installation (Recommended)
 
-Используй скрипт автоматической установки — он всё настроит за тебя:
+Use the automatic installation script — it will configure everything for you:
 
 ```bash
-# Убедись, что ты в папке проекта
+# Make sure you're in the project directory
 cd gemini_cli_gateway_tg
 
-# Сделай скрипт исполняемым
+# Make the script executable
 chmod +x install.sh
 
-# Запусти установку
+# Run the installation
 ./install.sh
 ```
 
-Скрипт автоматически:
-- ✅ Определит текущего пользователя и пути
-- ✅ Проверит наличие `.env` и виртуального окружения
-- ✅ Создаст systemd service файл с правильными путями
-- ✅ Установит и запустит сервис
-- ✅ Включит автозапуск при загрузке системы
+The script automatically:
+- ✅ Detects current user and paths
+- ✅ Validates `.env` and virtual environment
+- ✅ Creates systemd service file with correct paths
+- ✅ Installs and starts the service
+- ✅ Enables auto-start on boot
 
-**Что нужно перед запуском:**
-1. Создать `.env` файл: `cp .env.example .env && nano .env`
-2. Установить зависимости: `pip install -r requirements.txt`
-3. Установить Gemini CLI: `npm install -g @google/gemini-cli`
+**Prerequisites before running:**
+1. Create `.env` file: `cp .env.example .env && nano .env`
+2. Install dependencies: `pip install -r requirements.txt`
+3. Install Gemini CLI: `npm install -g @google/gemini-cli`
 
 ---
 
-#### Ручная установка (альтернатива)
+#### Manual Installation (Alternative)
 
-Если хочешь настроить всё вручную:
+If you prefer to configure everything manually:
 
 <details>
-<summary>Развернуть инструкцию по ручной установке</summary>
+<summary>Expand manual installation instructions</summary>
 
 ##### 1. Edit the service file
 
-Открой файл `telegram-gateway.service` в редакторе и замени пути на свои:
+Open `telegram-gateway.service` in an editor and update the paths:
 
 ```bash
 nano telegram-gateway.service
 ```
 
-Найди секцию `[Service]` и измени следующие строки:
+Find the `[Service]` section and modify these lines:
 
 ```ini
 [Service]
-User=your_username                          # Замени на своё имя пользователя (например: User=ubuntu)
-WorkingDirectory=/path/to/gemini_cli_gateway_tg    # Полный путь к папке проекта (например: /home/ubuntu/gemini_cli_gateway_tg)
-EnvironmentFile=/path/to/gemini_cli_gateway_tg/.env    # Полный путь к .env файлу
-ExecStart=/path/to/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main    # Полный путь к python в venv
+User=your_username                          # Replace with your username (e.g., User=ubuntu)
+WorkingDirectory=/path/to/gemini_cli_gateway_tg    # Full path to project directory (e.g., /home/ubuntu/gemini_cli_gateway_tg)
+EnvironmentFile=/path/to/gemini_cli_gateway_tg/.env    # Full path to .env file
+ExecStart=/path/to/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main    # Full path to python in venv
 ```
 
-**Пример для пользователя `ubuntu` с проектом в `/home/ubuntu/gemini_cli_gateway_tg`:**
+**Example for user `ubuntu` with project in `/home/ubuntu/gemini_cli_gateway_tg`:**
 
 ```ini
 [Service]
@@ -218,9 +218,9 @@ EnvironmentFile=/home/ubuntu/gemini_cli_gateway_tg/.env
 ExecStart=/home/ubuntu/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main
 ```
 
-**Как узнать свои пути:**
-- Имя пользователя: `whoami`
-- Текущая директория: `pwd` (выполни в папке проекта)
+**How to find your paths:**
+- Username: `whoami`
+- Current directory: `pwd` (run in project folder)
 
 ##### 2. Install and enable the service
 
