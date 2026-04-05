@@ -69,9 +69,16 @@ class GeminiStreamParser:
             content = data.get("content", "")
 
             if role == "assistant" and content:
-                # Экранируем HTML-спецсимволы из текста Gemini,
-                # чтобы не ломать Telegram parse_mode=HTML
-                event.text_chunk = html_escape(content)
+                # Поиск тега отправки файла (напр. [SEND_FILE: /path/to/img.png])
+                send_file_match = re.search(r"\[SEND_FILE:\s*(.+?)\]", content)
+                if send_file_match:
+                    # Захватываем путь и удаляем тег из отображаемого контента
+                    event.created_file = send_file_match.group(1).strip()
+                    content = content.replace(send_file_match.group(0), "").strip()
+                
+                if content:
+                    # Экранируем HTML-спецсимволы из текста Gemini
+                    event.text_chunk = html_escape(content)
             return event
 
         # === tool_use: вызов инструмента ===

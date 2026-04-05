@@ -82,6 +82,7 @@ class SessionManager:
         user_id: int,
         on_chunk: Callable[[str], asyncio.Future],
         on_approval: Callable[[dict], asyncio.Future],
+        on_file: Callable[[str], asyncio.Future] = None,
     ) -> None:
         """Отправить промпт в одноразовый процесс и стримить ответ."""
         args = [
@@ -144,6 +145,9 @@ class SessionManager:
                     logger.info(
                         f"Captured session_id: {event.session_id} for user {user_id}"
                     )
+
+                if event.created_file and on_file:
+                    await on_file(event.created_file)
 
                 if event.text_chunk:
                     await on_chunk(event.text_chunk)

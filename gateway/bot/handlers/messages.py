@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile
 
 from gateway.bot.keyboards import inline
 from gateway.config import Config
@@ -65,12 +65,29 @@ async def message_handler(
         )
         # Session manager останется ждать ответа, пока не дернут callback_interactive_approve
 
+    async def on_file(filepath: str) -> None:
+        logger.info(f"Отправка сгенерированного файла: {filepath}")
+        try:
+            import os
+            if os.path.exists(filepath):
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=FSInputFile(filepath),
+                    caption="📎 ИИ сгенерировал и вложил этот файл."
+                )
+            else:
+                await streamer.append_text(f"\n\n❌ Ошибка: Файл {filepath} не найден на диске.")
+        except Exception as e:
+            logger.error(f"Не удалось отправить файл {filepath}: {e}")
+            await streamer.append_text(f"\n\n❌ Ошибка отправки файла: {e}")
+
     try:
         await session_manager.send_prompt(
             prompt=prompt, 
             user_id=message.from_user.id,
             on_chunk=on_chunk, 
-            on_approval=on_approval
+            on_approval=on_approval,
+            on_file=on_file,
         )
     except Exception as e:
         logger.error(f"Ошибка при процессинге промпта: {e}", exc_info=True)

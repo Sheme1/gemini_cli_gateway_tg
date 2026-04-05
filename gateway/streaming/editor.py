@@ -36,6 +36,47 @@ class StreamEditor:
         self.last_update_task: Optional[asyncio.Task] = None
         self.is_flushing = False
         self._first_chunk = True  # Флаг: ещё не было реального текста
+        self._loading_task: Optional[asyncio.Task] = None
+
+    async def _loading_animation(self, chat_id: int, message_id: int) -> None:
+        """Показывает анимацию стадий загрузки агента."""
+        stages = [
+            "⏳ <i>[1/4] Инициализация Gemini CLI...</i>",
+            "🔐 <i>[2/4] Подключение к Keychain...</i>",
+            "🔌 <i>[3/4] Прогрев MCP серверов (обычно 8-10 сек)...</i>",
+            "🧠 <i>[4/4] Ожидание ответа модели...</i>",
+        ]
+        times = [0, 2, 5, 9]  # секунды
+        
+        try:
+            start_time = asyncio.get_event_loop().time()
+            stage_idx = 0
+            
+            while True:
+                current_time = asyncio.get_event_loop().time()
+                elapsed = current_time - start_time
+                
+                # Ищем активную стадию
+                new_idx = stage_idx
+                for i, t in enumerate(times):
+                    if elapsed >= t:
+                        new_idx = i
+                
+                if new_idx > stage_idx:
+                    stage_idx = new_idx
+                    try:
+                        await self.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=stages[stage_idx],
+                            parse_mode="HTML"
+                        )
+                    except TelegramBadRequest:
+                        pass # Игнорируем если не изменилось
+                
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
 
     async def initialize(self, initial_text: str = "⏳ <i>Генерирую ответ...</i>") -> None:
         """Отправляет первое сообщение-плейсхолдер, которое будет обновлено."""
@@ -48,6 +89,11 @@ class StreamEditor:
         self.last_sent_text = initial_text
         self.text_buffer = ""
         self._first_chunk = True
+        
+        # Запускаем анимацию
+        self._loading_task = asyncio.create_task(
+            self._loading_animation(self.chat_id, self.current_message_id)
+        )
 
     async def append_text(self, text_chunk: str) -> None:
         """Добавляет текст в буфер и планирует обновление, если нужно."""
@@ -55,6 +101,8 @@ class StreamEditor:
         if self._first_chunk:
             self._first_chunk = False
             self.last_sent_text = ""
+            if self._loading_task and not self._loading_task.done():
+                self._loading_task.cancel()
 
         self.text_buffer += text_chunk
 
@@ -136,6 +184,9 @@ class StreamEditor:
     async def flush(self) -> None:
         """Принудительно отправляет всё, что осталось в буфере (вызывать в конце)."""
         self.is_flushing = True
+        
+        if self._loading_task and not self._loading_task.done():
+            self._loading_task.cancel()
 
         # Отменяем ждущий апдейт
         if self.last_update_task and not self.last_update_task.done():
