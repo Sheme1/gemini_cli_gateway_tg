@@ -1,3 +1,4 @@
+import aiogram
 from aiogram import Router, html
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
@@ -62,6 +63,63 @@ async def command_sessions_handler(
     except Exception as e:
         await message.answer(f"❌ Ошибка при получении сессий: {e}")
 
+
+@router.message(Command("mcp"))
+async def command_mcp_handler(
+    message: Message, session_manager: SessionManager, bot: aiogram.Bot, config: Config
+) -> None:
+    """Обработчик команды /mcp."""
+    args = message.text.split(maxsplit=1)
+    if len(args) == 1:
+        # Просто показывает список
+        await message.answer("⏳ <i>Гружу список MCP-серверов...</i>", parse_mode="HTML")
+        servers = await session_manager.get_mcp_list()
+        text = "🔌 <b>Установленные MCP серверы:</b>\n\n"
+        for name, enabled in servers:
+            icon = "🟢" if enabled else "🔴"
+            status_text = "" if enabled else " <i>(отключен)</i>"
+            text += f"{icon} <code>{name}</code>{status_text}\n"
+        
+        text += "\n💡 Включай и выключай их кнопками ниже.\nЧтобы задействовать MCP в промпте, напиши: <code>/mcp имя запрос</code>\nИли просто упомяни <code>@имя</code> в любом сообщении."
+        await message.answer(text, reply_markup=inline.get_mcp_list_keyboard(servers), parse_mode="HTML")
+        return
+
+    # Вызов сервера с параметрами
+    payload = args[1].split(maxsplit=1)
+    server_name = payload[0]
+    prompt = payload[1] if len(payload) > 1 else ""
+
+    gemini_prompt = f"@{server_name} {prompt}"
+    from gateway.bot.handlers.messages import process_gemini_prompt
+    await process_gemini_prompt(bot, message.chat.id, message.from_user.id, gemini_prompt, session_manager, config)
+
+
+@router.message(Command("skills"))
+async def command_skills_handler(
+    message: Message, session_manager: SessionManager, bot: aiogram.Bot, config: Config
+) -> None:
+    """Обработчик команды /skills."""
+    args = message.text.split(maxsplit=1)
+    if len(args) == 1:
+        await message.answer("⏳ <i>Запрашиваю навыки (skills)...</i>", parse_mode="HTML")
+        skills = await session_manager.get_skills_list()
+        text = "🧠 <b>Установленные Агенты-Скиллы:</b>\n\n"
+        for name, enabled in skills:
+            icon = "🟢" if enabled else "🔴"
+            status_text = "" if enabled else " <i>(отключен)</i>"
+            text += f"{icon} <code>{name}</code>{status_text}\n"
+            
+        text += "\n💡 Включай и выключай скиллы кнопками ниже.\nЧтобы принудительно запустить скилл, напиши: <code>/skills имя запрос</code>"
+        await message.answer(text, reply_markup=inline.get_skills_list_keyboard(skills), parse_mode="HTML")
+        return
+
+    payload = args[1].split(maxsplit=1)
+    skill_name = payload[0]
+    prompt = payload[1] if len(payload) > 1 else ""
+
+    gemini_prompt = f"@{skill_name} {prompt}"
+    from gateway.bot.handlers.messages import process_gemini_prompt
+    await process_gemini_prompt(bot, message.chat.id, message.from_user.id, gemini_prompt, session_manager, config)
 
 @router.message(Command("status"))
 async def command_status_handler(

@@ -43,6 +43,8 @@ async def main() -> None:
             BotCommand(command="start", description="Запуск бота / Главное меню"),
             BotCommand(command="new", description="🔄 Новый диалог (сброс контекста)"),
             BotCommand(command="sessions", description="📂 Загрузить прошлую сессию"),
+            BotCommand(command="mcp", description="🔌 Управление MCP серверами"),
+            BotCommand(command="skills", description="🧠 Управление Skills"),
             BotCommand(command="model", description="Выбрать модель Gemini"),
             BotCommand(command="settings", description="Настройки Gemini CLI"),
             BotCommand(command="status", description="Статус сессии Gemini"),

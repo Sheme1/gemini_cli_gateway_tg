@@ -132,3 +132,64 @@ async def callback_set_approval(
     await session_manager.reset(callback.from_user.id)
     await callback.message.answer("✅ Готово. Новый режим применен.")
     await callback.answer()
+
+# ======================== MCP & Skills ========================
+
+@router.callback_query(F.data.startswith("mcp_toggle:"))
+async def callback_mcp_toggle(
+    callback: CallbackQuery, session_manager: SessionManager
+) -> None:
+    """Включение/выключение MCP сервера."""
+    _, name, action = callback.data.split(":")
+    enable = action == "enable"
+
+    await callback.answer(f"⏳ {'Включаю' if enable else 'Выключаю'} {name}...", show_alert=False)
+    
+    success = await session_manager.toggle_mcp(name, enable)
+    if success:
+        # Обновляем клавиатуру
+        servers = await session_manager.get_mcp_list()
+        await callback.message.edit_reply_markup(
+            reply_markup=inline.get_mcp_list_keyboard(servers)
+        )
+    else:
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "mcp_refresh")
+async def callback_mcp_refresh(
+    callback: CallbackQuery, session_manager: SessionManager
+) -> None:
+    servers = await session_manager.get_mcp_list()
+    await callback.message.edit_reply_markup(
+        reply_markup=inline.get_mcp_list_keyboard(servers)
+    )
+    await callback.answer("🔄 Список обновлён")
+
+@router.callback_query(F.data.startswith("skill_toggle:"))
+async def callback_skill_toggle(
+    callback: CallbackQuery, session_manager: SessionManager
+) -> None:
+    """Включение/выключение Skill."""
+    _, name, action = callback.data.split(":")
+    enable = action == "enable"
+
+    await callback.answer(f"⏳ {'Включаю' if enable else 'Выключаю'} {name}...", show_alert=False)
+    
+    success = await session_manager.toggle_skill(name, enable)
+    if success:
+        skills = await session_manager.get_skills_list()
+        await callback.message.edit_reply_markup(
+            reply_markup=inline.get_skills_list_keyboard(skills)
+        )
+    else:
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "skill_refresh")
+async def callback_skill_refresh(
+    callback: CallbackQuery, session_manager: SessionManager
+) -> None:
+    skills = await session_manager.get_skills_list()
+    await callback.message.edit_reply_markup(
+        reply_markup=inline.get_skills_list_keyboard(skills)
+    )
+    await callback.answer("🔄 Список обновлён")

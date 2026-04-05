@@ -58,6 +58,76 @@ class SessionManager:
                 sessions.append((session_id, desc))
         return sessions
 
+    async def get_mcp_list(self) -> list[tuple[str, bool]]:
+        """Возвращает актуальный список MCP серверов: (имя, включен_ли)."""
+        process = await asyncio.create_subprocess_exec(
+            "gemini", "mcp", "list",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=self.config.gemini_working_dir,
+        )
+        stdout, _ = await process.communicate()
+        lines = stdout.decode("utf-8").splitlines()
+
+        import re
+        mcp_servers = []
+        for line in lines:
+            line = line.strip()
+            # Улавливаем "✓ exa:" или "x github:" 
+            match = re.search(r"^([✓xX\s]*)\s*([a-zA-Z0-9_\-]+):", line)
+            if match:
+                status_icon = match.group(1).strip()
+                name = match.group(2).strip()
+                is_enabled = "✓" in status_icon
+                mcp_servers.append((name, is_enabled))
+        return mcp_servers
+
+    async def get_skills_list(self) -> list[tuple[str, bool]]:
+        """Возвращает актуальный список Skills: (имя, включен_ли)."""
+        process = await asyncio.create_subprocess_exec(
+            "gemini", "skills", "list",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=self.config.gemini_working_dir,
+        )
+        stdout, _ = await process.communicate()
+        lines = stdout.decode("utf-8").splitlines()
+
+        import re
+        skills_list = []
+        for line in lines:
+            line = line.strip()
+            # Улавливаем "academic-writer [Enabled]"
+            match = re.search(r"^([a-zA-Z0-9_\-]+)\s+\[(Enabled|Disabled)\]", line, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                status = match.group(2).strip().lower()
+                is_enabled = status == "enabled"
+                skills_list.append((name, is_enabled))
+        return skills_list
+
+    async def toggle_mcp(self, name: str, enable: bool) -> bool:
+        cmd = "enable" if enable else "disable"
+        process = await asyncio.create_subprocess_exec(
+            "gemini", "mcp", cmd, name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=self.config.gemini_working_dir,
+        )
+        await process.wait()
+        return process.returncode == 0
+
+    async def toggle_skill(self, name: str, enable: bool) -> bool:
+        cmd = "enable" if enable else "disable"
+        process = await asyncio.create_subprocess_exec(
+            "gemini", "skills", cmd, name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=self.config.gemini_working_dir,
+        )
+        await process.wait()
+        return process.returncode == 0
+
     async def is_alive(self) -> bool:
         return True
 

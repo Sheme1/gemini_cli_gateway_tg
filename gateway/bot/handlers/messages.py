@@ -23,6 +23,7 @@ async def message_handler(
         return
 
     chat_id = message.chat.id
+    user_id = message.from_user.id
 
     # Добавляем контекст для reply-сообщений
     if message.reply_to_message and message.reply_to_message.text:
@@ -37,6 +38,17 @@ async def message_handler(
             f"Текущий ответ от {message.from_user.full_name}:\n{prompt}"
         )
 
+    await process_gemini_prompt(bot, chat_id, user_id, prompt, session_manager, config)
+
+async def process_gemini_prompt(
+    bot: Any,
+    chat_id: int,
+    user_id: int,
+    prompt: str,
+    session_manager: SessionManager,
+    config: Config,
+) -> None:
+    """Общая функция потокового вывода промпта для любых хендлеров."""
     # Инициализация стримера
     streamer = StreamEditor(
         bot=bot,
@@ -84,7 +96,7 @@ async def message_handler(
     try:
         await session_manager.send_prompt(
             prompt=prompt, 
-            user_id=message.from_user.id,
+            user_id=user_id,
             on_chunk=on_chunk, 
             on_approval=on_approval,
             on_file=on_file,
