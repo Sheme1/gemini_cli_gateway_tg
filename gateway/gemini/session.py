@@ -45,71 +45,122 @@ class SessionManager:
                 continue
 
             # Формат: "8. Узнать погоду. (Just now) [ed4342c5-efa4-48ff-8846-6ee37b8efb64]"
-            match = re.search(r"^\s*\d+\.\s*(.*?)\s*\((.*?)\)\s*\[([a-fA-F0-9\-]+)\]", line)
+            match = re.search(
+                r"^\s*\d+\.\s*(.*?)\s*\((.*?)\)\s*\[([a-fA-F0-9\-]+)\]", line
+            )
             if match:
-                desc_raw = match.group(1).strip().strip(':')
+                desc_raw = match.group(1).strip().strip(":")
                 time_ago = match.group(2).strip()
                 session_id = match.group(3).strip()
-                
+
                 desc = desc_raw if desc_raw else "Без описания"
                 desc = f"{desc} ({time_ago})"
                 desc = desc[:60] + "..." if len(desc) > 60 else desc
-                
+
                 sessions.append((session_id, desc))
         return sessions
 
     async def get_mcp_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список MCP серверов: (имя, включен_ли)."""
         process = await asyncio.create_subprocess_exec(
-            "gemini", "mcp", "list",
+            "gemini",
+            "mcp",
+            "list",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.gemini_working_dir,
         )
         stdout, _ = await process.communicate()
-        lines = stdout.decode("utf-8").splitlines()
+        output = stdout.decode("utf-8")
+        lines = output.splitlines()
 
-        import re
+        logger.debug(f"Raw output from 'gemini mcp list':\n{output}")
+
         mcp_servers = []
         for line in lines:
             line = line.strip()
-            # Улавливаем "✓ exa:" или "x github:" 
-            match = re.search(r"^([✓xX\s]*)\s*([a-zA-Z0-9_\-]+):", line)
+            # Пропускаем служебные строки
+            if (
+                not line
+                or "Configured MCP servers:" in line
+                or "Loaded cached" in line
+                or line.startswith("[")
+            ):  # ANSI escape codes
+                continue
+
+            # Формат: "✓ exa: ..." или "✗ context7: ..." или "✓ chrome-devtools (from ...): ..."
+            # Улавливаем статус (✓/✗), имя (до двоеточия, без "(from ...)")
+            match = re.search(
+                r"^([✓✗xX])\s+([a-zA-Z0-9_\-]+)(?:\s+\(from [^)]+\))?:", line
+            )
             if match:
                 status_icon = match.group(1).strip()
                 name = match.group(2).strip()
-                is_enabled = "✓" in status_icon
+                is_enabled = status_icon == "✓"
                 mcp_servers.append((name, is_enabled))
+                logger.debug(f"Parsed MCP server: {name} (enabled={is_enabled})")
+
+        logger.info(f"Found {len(mcp_servers)} MCP servers")
         return mcp_servers
 
     async def get_skills_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список Skills: (имя, включен_ли)."""
         process = await asyncio.create_subprocess_exec(
-            "gemini", "skills", "list",
+            "gemini",
+            "skills",
+            "list",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.gemini_working_dir,
         )
         stdout, _ = await process.communicate()
-        lines = stdout.decode("utf-8").splitlines()
+        output = stdout.decode("utf-8")
+        lines = output.splitlines()
 
-        import re
+        logger.debug(f"Raw output from 'gemini skills list':\n{output}")
+
         skills_list = []
         for line in lines:
             line = line.strip()
-            # Улавливаем "academic-writer [Enabled]"
-            match = re.search(r"^([a-zA-Z0-9_\-]+)\s+\[(Enabled|Disabled)\]", line, re.IGNORECASE)
+            # Пропускаем служебные строки (логи, заголовки, пустые строки)
+            if (
+                not line
+                or "Loaded cached" in line
+                or "Loading extension" in line
+                or "Scheduling MCP" in line
+                or "Executing MCP" in line
+                or "MCP context refresh" in line
+                or "Registering notification" in line
+                or ("Server" in line and "supports" in line)
+                or "Discovered Agent Skills:" in line
+                or "Description:" in line
+                or "Location:" in line
+                or line.startswith("[")  # ANSI escape codes
+                or line.startswith("Capabilities:")
+            ):
+                continue
+
+            # Формат: "a11y-debugging [Enabled]"
+            match = re.search(
+                r"^([a-zA-Z0-9_\-]+)\s+\[(Enabled|Disabled)\]", line, re.IGNORECASE
+            )
             if match:
                 name = match.group(1).strip()
                 status = match.group(2).strip().lower()
                 is_enabled = status == "enabled"
                 skills_list.append((name, is_enabled))
+                logger.debug(f"Parsed skill: {name} (enabled={is_enabled})")
+
+        logger.info(f"Found {len(skills_list)} skills")
         return skills_list
 
     async def toggle_mcp(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
         process = await asyncio.create_subprocess_exec(
-            "gemini", "mcp", cmd, name,
+            "gemini",
+            "mcp",
+            cmd,
+            name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.gemini_working_dir,
@@ -120,7 +171,10 @@ class SessionManager:
     async def toggle_skill(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
         process = await asyncio.create_subprocess_exec(
-            "gemini", "skills", cmd, name,
+            "gemini",
+            "skills",
+            cmd,
+            name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.gemini_working_dir,

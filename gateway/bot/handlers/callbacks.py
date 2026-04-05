@@ -1,6 +1,8 @@
 import logging
+import time
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 
 from gateway.bot.keyboards import inline
@@ -9,6 +11,10 @@ from gateway.gemini.session import SessionManager
 
 logger = logging.getLogger(__name__)
 router = Router(name="callbacks")
+
+# Простой rate limiter (user_id -> timestamp последнего обновления)
+_refresh_cooldown: dict[int, float] = {}
+REFRESH_COOLDOWN_SECONDS = 3  # 3 секунды между обновлениями
 
 # ======================== Модель ========================
 
@@ -38,21 +44,23 @@ async def callback_model(
 
 # ======================== Sessions ========================
 
+
 @router.callback_query(F.data.startswith("resume_"))
 async def callback_resume_session(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
     """Выбор старой сессии из списка /sessions."""
     session_id = callback.data.split("resume_")[1]
-    
+
     await session_manager.set_active_session(callback.from_user.id, session_id)
-    
+
     await callback.message.edit_text(
         f"✅ <b>Сессия выбрана:</b> <code>{session_id}</code>\n"
         f"Все последующие запросы будут отправлены в этот контекст.",
-        reply_markup=None
+        reply_markup=None,
     )
     await callback.answer()
+
 
 # ======================== Approval ========================
 
@@ -133,7 +141,9 @@ async def callback_set_approval(
     await callback.message.answer("✅ Готово. Новый режим применен.")
     await callback.answer()
 
+
 # ======================== MCP & Skills ========================
+
 
 @router.callback_query(F.data.startswith("mcp_toggle:"))
 async def callback_mcp_toggle(
@@ -143,27 +153,57 @@ async def callback_mcp_toggle(
     _, name, action = callback.data.split(":")
     enable = action == "enable"
 
-    await callback.answer(f"⏳ {'Включаю' if enable else 'Выключаю'} {name}...", show_alert=False)
-    
+    await callback.answer(
+        f"⏳ {'Включаю' if enable else 'Выключаю'} {name}...", show_alert=False
+    )
+
     success = await session_manager.toggle_mcp(name, enable)
     if success:
         # Обновляем клавиатуру
         servers = await session_manager.get_mcp_list()
-        await callback.message.edit_reply_markup(
-            reply_markup=inline.get_mcp_list_keyboard(servers)
-        )
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=inline.get_mcp_list_keyboard(servers)
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise
     else:
         await callback.answer("❌ Ошибка", show_alert=True)
+
 
 @router.callback_query(F.data == "mcp_refresh")
 async def callback_mcp_refresh(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
+    user_id = callback.from_user.id
+    now = time.time()
+
+    # Rate limiting
+    if user_id in _refresh_cooldown:
+        time_since_last = now - _refresh_cooldown[user_id]
+        if time_since_last < REFRESH_COOLDOWN_SECONDS:
+            remaining = int(REFRESH_COOLDOWN_SECONDS - time_since_last)
+            await callback.answer(
+                f"⏳ Подожди {remaining} сек. перед следующим обновлением",
+                show_alert=False,
+            )
+            return
+
+    _refresh_cooldown[user_id] = now
+
     servers = await session_manager.get_mcp_list()
-    await callback.message.edit_reply_markup(
-        reply_markup=inline.get_mcp_list_keyboard(servers)
-    )
-    await callback.answer("🔄 Список обновлён")
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=inline.get_mcp_list_keyboard(servers)
+        )
+        await callback.answer("🔄 Список обновлён")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            await callback.answer("✅ Список актуален", show_alert=False)
+        else:
+            raise
+
 
 @router.callback_query(F.data.startswith("skill_toggle:"))
 async def callback_skill_toggle(
@@ -173,23 +213,52 @@ async def callback_skill_toggle(
     _, name, action = callback.data.split(":")
     enable = action == "enable"
 
-    await callback.answer(f"⏳ {'Включаю' if enable else 'Выключаю'} {name}...", show_alert=False)
-    
+    await callback.answer(
+        f"⏳ {'Включаю' if enable else 'Выключаю'} {name}...", show_alert=False
+    )
+
     success = await session_manager.toggle_skill(name, enable)
     if success:
         skills = await session_manager.get_skills_list()
-        await callback.message.edit_reply_markup(
-            reply_markup=inline.get_skills_list_keyboard(skills)
-        )
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=inline.get_skills_list_keyboard(skills)
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise
     else:
         await callback.answer("❌ Ошибка", show_alert=True)
+
 
 @router.callback_query(F.data == "skill_refresh")
 async def callback_skill_refresh(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
+    user_id = callback.from_user.id
+    now = time.time()
+
+    # Rate limiting
+    if user_id in _refresh_cooldown:
+        time_since_last = now - _refresh_cooldown[user_id]
+        if time_since_last < REFRESH_COOLDOWN_SECONDS:
+            remaining = int(REFRESH_COOLDOWN_SECONDS - time_since_last)
+            await callback.answer(
+                f"⏳ Подожди {remaining} сек. перед следующим обновлением",
+                show_alert=False,
+            )
+            return
+
+    _refresh_cooldown[user_id] = now
+
     skills = await session_manager.get_skills_list()
-    await callback.message.edit_reply_markup(
-        reply_markup=inline.get_skills_list_keyboard(skills)
-    )
-    await callback.answer("🔄 Список обновлён")
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=inline.get_skills_list_keyboard(skills)
+        )
+        await callback.answer("🔄 Список обновлён")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            await callback.answer("✅ Список актуален", show_alert=False)
+        else:
+            raise

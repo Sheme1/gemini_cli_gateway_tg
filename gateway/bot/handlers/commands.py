@@ -35,7 +35,9 @@ async def command_new_handler(
 ) -> None:
     """Обработчик команды /new — сброс контекста Gemini."""
     await session_manager.reset(message.from_user.id)
-    await message.answer("✅ Контекст полностью очищен. Следующее сообщение начнет новый диалог.")
+    await message.answer(
+        "✅ Контекст полностью очищен. Следующее сообщение начнет новый диалог."
+    )
 
 
 @router.message(Command("sessions"))
@@ -52,12 +54,16 @@ async def command_sessions_handler(
 
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         from aiogram.types import InlineKeyboardButton
-        
+
         builder = InlineKeyboardBuilder()
         text_lines = ["📂 <b>Доступные сессии:</b>\n"]
         for idx, (s_id, desc) in enumerate(sessions, 1):
             text_lines.append(f"{idx}. <code>{s_id}</code>\n   {html.quote(desc)}")
-            builder.row(InlineKeyboardButton(text=f"Открыть #{idx} ({s_id[:6]})", callback_data=f"resume_{s_id}"))
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"Открыть #{idx} ({s_id[:6]})", callback_data=f"resume_{s_id}"
+                )
+            )
 
         await message.answer("\n".join(text_lines), reply_markup=builder.as_markup())
     except Exception as e:
@@ -72,16 +78,30 @@ async def command_mcp_handler(
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
         # Просто показывает список
-        await message.answer("⏳ <i>Гружу список MCP-серверов...</i>", parse_mode="HTML")
+        await message.answer(
+            "⏳ <i>Гружу список MCP-серверов...</i>", parse_mode="HTML"
+        )
         servers = await session_manager.get_mcp_list()
+
+        # Fallback для пустого списка
+        if not servers:
+            await message.answer(
+                "🔌 <b>MCP серверы не найдены</b>\n\n"
+                "Установите MCP серверы через <code>gemini mcp install</code>",
+                parse_mode="HTML",
+            )
+            return
+
         text = "🔌 <b>Установленные MCP серверы:</b>\n\n"
         for name, enabled in servers:
             icon = "🟢" if enabled else "🔴"
             status_text = "" if enabled else " <i>(отключен)</i>"
             text += f"{icon} <code>{name}</code>{status_text}\n"
-        
+
         text += "\n💡 Включай и выключай их кнопками ниже.\nЧтобы задействовать MCP в промпте, напиши: <code>/mcp имя запрос</code>\nИли просто упомяни <code>@имя</code> в любом сообщении."
-        await message.answer(text, reply_markup=inline.get_mcp_list_keyboard(servers), parse_mode="HTML")
+        await message.answer(
+            text, reply_markup=inline.get_mcp_list_keyboard(servers), parse_mode="HTML"
+        )
         return
 
     # Вызов сервера с параметрами
@@ -91,7 +111,15 @@ async def command_mcp_handler(
 
     gemini_prompt = f"@{server_name} {prompt}"
     from gateway.bot.handlers.messages import process_gemini_prompt
-    await process_gemini_prompt(bot, message.chat.id, message.from_user.id, gemini_prompt, session_manager, config)
+
+    await process_gemini_prompt(
+        bot,
+        message.chat.id,
+        message.from_user.id,
+        gemini_prompt,
+        session_manager,
+        config,
+    )
 
 
 @router.message(Command("skills"))
@@ -101,16 +129,32 @@ async def command_skills_handler(
     """Обработчик команды /skills."""
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
-        await message.answer("⏳ <i>Запрашиваю навыки (skills)...</i>", parse_mode="HTML")
+        await message.answer(
+            "⏳ <i>Запрашиваю навыки (skills)...</i>", parse_mode="HTML"
+        )
         skills = await session_manager.get_skills_list()
+
+        # Fallback для пустого списка
+        if not skills:
+            await message.answer(
+                "🧠 <b>Agent Skills не найдены</b>\n\n"
+                "Установите skills через <code>gemini skills install</code>",
+                parse_mode="HTML",
+            )
+            return
+
         text = "🧠 <b>Установленные Агенты-Скиллы:</b>\n\n"
         for name, enabled in skills:
             icon = "🟢" if enabled else "🔴"
             status_text = "" if enabled else " <i>(отключен)</i>"
             text += f"{icon} <code>{name}</code>{status_text}\n"
-            
+
         text += "\n💡 Включай и выключай скиллы кнопками ниже.\nЧтобы принудительно запустить скилл, напиши: <code>/skills имя запрос</code>"
-        await message.answer(text, reply_markup=inline.get_skills_list_keyboard(skills), parse_mode="HTML")
+        await message.answer(
+            text,
+            reply_markup=inline.get_skills_list_keyboard(skills),
+            parse_mode="HTML",
+        )
         return
 
     payload = args[1].split(maxsplit=1)
@@ -119,7 +163,16 @@ async def command_skills_handler(
 
     gemini_prompt = f"@{skill_name} {prompt}"
     from gateway.bot.handlers.messages import process_gemini_prompt
-    await process_gemini_prompt(bot, message.chat.id, message.from_user.id, gemini_prompt, session_manager, config)
+
+    await process_gemini_prompt(
+        bot,
+        message.chat.id,
+        message.from_user.id,
+        gemini_prompt,
+        session_manager,
+        config,
+    )
+
 
 @router.message(Command("status"))
 async def command_status_handler(
