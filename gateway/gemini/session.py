@@ -32,32 +32,30 @@ class SessionManager:
         sessions = []
         for line in lines:
             line = line.strip()
-            # Пропускаем логи и пустые строки
+            # Пропускаем заголовки, логи и пустые строки
             if (
                 not line
                 or "No previous" in line
+                or "Available sessions" in line
                 or "Keychain" in line
                 or "Loaded" in line
                 or "Using" in line
+                or "error:" in line.lower()
             ):
                 continue
 
-            # Формат вывода --list-sessions обычно содержит индекс/ID и текст
-            match = re.search(r"^\s*([a-zA-Z0-9\-]+)\s+(.+)$", line)
+            # Формат: "8. Узнать погоду. (Just now) [ed4342c5-efa4-48ff-8846-6ee37b8efb64]"
+            match = re.search(r"^\s*\d+\.\s*(.*?)\s*\((.*?)\)\s*\[([a-fA-F0-9\-]+)\]", line)
             if match:
-                session_id = match.group(1)
-                desc = (
-                    match.group(2)[:60] + "..."
-                    if len(match.group(2)) > 60
-                    else match.group(2)
-                )
+                desc_raw = match.group(1).strip().strip(':')
+                time_ago = match.group(2).strip()
+                session_id = match.group(3).strip()
+                
+                desc = desc_raw if desc_raw else "Без описания"
+                desc = f"{desc} ({time_ago})"
+                desc = desc[:60] + "..." if len(desc) > 60 else desc
+                
                 sessions.append((session_id, desc))
-            else:
-                parts = line.split(maxsplit=1)
-                if len(parts) >= 1:
-                    session_id = parts[0]
-                    desc = parts[1][:60] + "..." if len(parts) > 1 else "Без описания"
-                    sessions.append((session_id, desc))
         return sessions
 
     async def is_alive(self) -> bool:
