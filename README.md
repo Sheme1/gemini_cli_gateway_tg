@@ -154,7 +154,43 @@ LOG_LEVEL=INFO                              # DEBUG / INFO / WARNING / ERROR
 
 Systemd ensures the bot starts automatically on boot and restarts on failure.
 
-#### 1. Edit the service file
+#### Автоматическая установка (рекомендуется)
+
+Используй скрипт автоматической установки — он всё настроит за тебя:
+
+```bash
+# Убедись, что ты в папке проекта
+cd gemini_cli_gateway_tg
+
+# Сделай скрипт исполняемым
+chmod +x install.sh
+
+# Запусти установку
+./install.sh
+```
+
+Скрипт автоматически:
+- ✅ Определит текущего пользователя и пути
+- ✅ Проверит наличие `.env` и виртуального окружения
+- ✅ Создаст systemd service файл с правильными путями
+- ✅ Установит и запустит сервис
+- ✅ Включит автозапуск при загрузке системы
+
+**Что нужно перед запуском:**
+1. Создать `.env` файл: `cp .env.example .env && nano .env`
+2. Установить зависимости: `pip install -r requirements.txt`
+3. Установить Gemini CLI: `npm install -g @google/gemini-cli`
+
+---
+
+#### Ручная установка (альтернатива)
+
+Если хочешь настроить всё вручную:
+
+<details>
+<summary>Развернуть инструкцию по ручной установке</summary>
+
+##### 1. Edit the service file
 
 Открой файл `telegram-gateway.service` в редакторе и замени пути на свои:
 
@@ -186,7 +222,7 @@ ExecStart=/home/ubuntu/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main
 - Имя пользователя: `whoami`
 - Текущая директория: `pwd` (выполни в папке проекта)
 
-#### 2. Install and enable the service
+##### 2. Install and enable the service
 
 ```bash
 # Copy service file to systemd directory
@@ -202,7 +238,7 @@ sudo systemctl enable telegram-gateway.service
 sudo systemctl start telegram-gateway.service
 ```
 
-#### 3. Verify the service is running
+##### 3. Verify the service is running
 
 ```bash
 # Check service status
@@ -215,7 +251,7 @@ sudo journalctl -u telegram-gateway -f
 sudo journalctl -u telegram-gateway -n 100
 ```
 
-#### 4. Useful systemd commands
+##### 4. Useful systemd commands
 
 ```bash
 # Stop the service
@@ -231,7 +267,7 @@ sudo systemctl disable telegram-gateway
 sudo systemctl is-enabled telegram-gateway
 ```
 
-#### 5. Update the bot
+##### 5. Update the bot
 
 When you update the code:
 
@@ -241,6 +277,8 @@ git pull
 pip install -r requirements.txt  # If dependencies changed
 sudo systemctl restart telegram-gateway
 ```
+
+</details>
 
 ---
 
