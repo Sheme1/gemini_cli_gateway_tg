@@ -156,15 +156,35 @@ Systemd ensures the bot starts automatically on boot and restarts on failure.
 
 #### 1. Edit the service file
 
-Open `telegram-gateway.service` and update the paths:
+Открой файл `telegram-gateway.service` в редакторе и замени пути на свои:
+
+```bash
+nano telegram-gateway.service
+```
+
+Найди секцию `[Service]` и измени следующие строки:
 
 ```ini
 [Service]
-User=your_username                          # Change to your username
-WorkingDirectory=/path/to/gemini_cli_gateway_tg
-EnvironmentFile=/path/to/gemini_cli_gateway_tg/.env
-ExecStart=/path/to/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main
+User=your_username                          # Замени на своё имя пользователя (например: User=ubuntu)
+WorkingDirectory=/path/to/gemini_cli_gateway_tg    # Полный путь к папке проекта (например: /home/ubuntu/gemini_cli_gateway_tg)
+EnvironmentFile=/path/to/gemini_cli_gateway_tg/.env    # Полный путь к .env файлу
+ExecStart=/path/to/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main    # Полный путь к python в venv
 ```
+
+**Пример для пользователя `ubuntu` с проектом в `/home/ubuntu/gemini_cli_gateway_tg`:**
+
+```ini
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/gemini_cli_gateway_tg
+EnvironmentFile=/home/ubuntu/gemini_cli_gateway_tg/.env
+ExecStart=/home/ubuntu/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main
+```
+
+**Как узнать свои пути:**
+- Имя пользователя: `whoami`
+- Текущая директория: `pwd` (выполни в папке проекта)
 
 #### 2. Install and enable the service
 
