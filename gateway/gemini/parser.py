@@ -8,7 +8,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Compiled once at module level for performance
-_ANSI_ESCAPE_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 @dataclass
@@ -19,6 +19,8 @@ class StreamEvent:
     created_file: Optional[str] = None
     session_id: Optional[str] = None
     event_type: str = ""
+    is_empty_response: bool = False
+    is_invalid_stream: bool = False
 
 
 class GeminiStreamParser:
@@ -32,6 +34,7 @@ class GeminiStreamParser:
       {"type":"tool_result","output":"..."}
       {"type":"result","status":"success","stats":{...}}
       {"type":"error","message":"..."}
+      {"type":"invalid_stream","reason":"NO_RESPONSE_TEXT"}
     """
 
     @staticmethod
@@ -41,7 +44,7 @@ class GeminiStreamParser:
             return StreamEvent()
 
         # Очистка ANSI escape-кодов
-        clean_line = _ANSI_ESCAPE_RE.sub('', line).strip()
+        clean_line = _ANSI_ESCAPE_RE.sub("", line).strip()
         if not clean_line:
             return StreamEvent()
 
@@ -58,8 +61,7 @@ class GeminiStreamParser:
         if event_type == "init":
             event.session_id = data.get("session_id")
             logger.info(
-                f"Gemini session init: id={event.session_id}, "
-                f"model={data.get('model')}"
+                f"Gemini session init: id={event.session_id}, model={data.get('model')}"
             )
             return event
 
@@ -75,7 +77,7 @@ class GeminiStreamParser:
                     # Захватываем путь и удаляем тег из отображаемого контента
                     event.created_file = send_file_match.group(1).strip()
                     content = content.replace(send_file_match.group(0), "").strip()
-                
+
                 if content:
                     # Экранируем HTML-спецсимволы из текста Gemini
                     event.text_chunk = html_escape(content)
@@ -88,10 +90,7 @@ class GeminiStreamParser:
             args_preview = html_escape(json.dumps(args, ensure_ascii=False))
             if len(args_preview) > 200:
                 args_preview = args_preview[:200] + "..."
-            event.text_chunk = (
-                f"\n\n🔧 <b>{tool_name}</b>\n"
-                f"<pre>{args_preview}</pre>\n"
-            )
+            event.text_chunk = f"\n\n🔧 <b>{tool_name}</b>\n<pre>{args_preview}</pre>\n"
             return event
 
         # === tool_result: результат инструмента ===
@@ -110,10 +109,18 @@ class GeminiStreamParser:
             stats = data.get("stats", {})
             total = stats.get("total_tokens", 0)
             duration = stats.get("duration_ms", 0)
+
+            # Проверка на пустой ответ (только thought tokens или нулевые токены)
+            thoughts_tokens = stats.get("thoughts_tokens", 0)
+            if total == 0 or (thoughts_tokens > 0 and total == thoughts_tokens):
+                event.is_empty_response = True
+                logger.warning(
+                    f"Detected empty response: total={total}, thoughts={thoughts_tokens}"
+                )
+
             if total or duration:
                 event.text_chunk = (
-                    f"\n\n📊 <i>Токены: {total} · "
-                    f"{duration / 1000:.1f}с</i>"
+                    f"\n\n📊 <i>Токены: {total} · {duration / 1000:.1f}с</i>"
                 )
             return event
 
@@ -121,6 +128,14 @@ class GeminiStreamParser:
         if event_type == "error":
             error_msg = html_escape(data.get("message", "Неизвестная ошибка"))
             event.text_chunk = f"\n\n⚠️ <b>Ошибка:</b> {error_msg}"
+            return event
+
+        # === invalid_stream: проблема со стримом ===
+        if event_type == "invalid_stream":
+            event.is_invalid_stream = True
+            reason = data.get("reason", "UNKNOWN")
+            logger.warning(f"InvalidStream event: reason={reason}")
+            event.text_chunk = f"\n\n⚠️ <i>Проблема со стримом: {reason}</i>"
             return event
 
         logger.debug(f"[UNKNOWN EVENT] type={event_type}, data={data}")

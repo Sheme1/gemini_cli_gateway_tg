@@ -229,7 +229,8 @@ class SessionManager:
         if session_id:
             args.extend(["--resume", session_id])
 
-        logger.info(f"Spawning Gemini: {' '.join(args)}")
+        logger.info(f"Spawning Gemini for user {user_id}: {' '.join(args)}")
+        logger.debug(f"Prompt preview: {prompt[:100]}...")
 
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -239,20 +240,61 @@ class SessionManager:
         )
 
         timeout = self.config.gemini_cli_timeout
+        heartbeat_interval = 30  # Heartbeat каждые 30 секунд
+        last_activity = asyncio.get_event_loop().time()
+        heartbeat_task = None
+
+        async def send_heartbeat():
+            """Периодически отправляет heartbeat если нет активности."""
+            nonlocal last_activity
+            heartbeat_count = 0
+            while True:
+                await asyncio.sleep(heartbeat_interval)
+                current_time = asyncio.get_event_loop().time()
+                idle_time = current_time - last_activity
+
+                if idle_time >= heartbeat_interval:
+                    heartbeat_count += 1
+                    elapsed_total = int(idle_time)
+                    await on_chunk(f"\n⏳ <i>Обработка... ({elapsed_total}с)</i>")
+                    logger.debug(f"Heartbeat #{heartbeat_count}: {elapsed_total}s idle")
 
         try:
+            # Запускаем heartbeat task
+            heartbeat_task = asyncio.create_task(send_heartbeat())
+
             while True:
                 try:
                     line_bytes = await asyncio.wait_for(
                         process.stdout.readline(),
                         timeout=timeout,
                     )
+                    last_activity = (
+                        asyncio.get_event_loop().time()
+                    )  # Обновляем время активности
                 except asyncio.TimeoutError:
-                    logger.warning(f"Gemini CLI таймаут ({timeout}с) — убиваем процесс")
+                    elapsed = int(asyncio.get_event_loop().time() - last_activity)
+                    logger.warning(f"Gemini CLI timeout after {elapsed}s of inactivity")
                     process.kill()
-                    await on_chunk(
-                        f"\n\n⚠️ Таймаут: Gemini не ответил за {timeout} секунд."
-                    )
+
+                    # Проверяем был ли хоть какой-то output
+                    if elapsed > 0:
+                        await on_chunk(
+                            f"\n\n⚠️ <b>Таймаут:</b> Gemini не отвечал {elapsed} секунд.\n"
+                            f"Возможные причины:\n"
+                            f"• Слишком сложный запрос для модели\n"
+                            f"• Проблемы с MCP серверами\n"
+                            f"• Зависание CLI в non-interactive режиме\n\n"
+                            f"Попробуйте:\n"
+                            f"• Упростить запрос\n"
+                            f"• Использовать /new для сброса контекста\n"
+                            f"• Повторить попытку позже"
+                        )
+                    else:
+                        await on_chunk(
+                            f"\n\n⚠️ <b>Таймаут:</b> Gemini не запустился.\n"
+                            f"Проверьте логи сервера."
+                        )
                     break
 
                 if not line_bytes:
@@ -267,6 +309,14 @@ class SessionManager:
 
                 event = GeminiStreamParser.parse_line(line_text)
 
+                # Логируем события для диагностики
+                if event.event_type:
+                    logger.debug(
+                        f"Event: type={event.event_type}, has_text={bool(event.text_chunk)}, "
+                        f"is_done={event.is_done}, is_empty={event.is_empty_response}, "
+                        f"is_invalid={event.is_invalid_stream}"
+                    )
+
                 # Захват session_id из init-события
                 if event.session_id and not session_id:
                     self.active_sessions[user_id] = event.session_id
@@ -280,6 +330,20 @@ class SessionManager:
                 if event.text_chunk:
                     await on_chunk(event.text_chunk)
 
+                # Обработка InvalidStream события
+                if event.is_invalid_stream:
+                    logger.warning("Received InvalidStream event, continuing...")
+                    continue
+
+                # Обработка пустого ответа
+                if event.is_empty_response:
+                    logger.warning("Received empty response, notifying user...")
+                    await on_chunk(
+                        "\n\n⚠️ <i>Модель вернула пустой ответ. "
+                        "Попробуйте переформулировать запрос.</i>"
+                    )
+                    break
+
                 if event.approval_request:
                     await on_approval(event.approval_request)
                     break
@@ -289,6 +353,14 @@ class SessionManager:
                     break
 
         finally:
+            # Останавливаем heartbeat task
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+
             # Гарантируем что процесс завершён
             if process.returncode is None:
                 try:
@@ -296,6 +368,11 @@ class SessionManager:
                 except ProcessLookupError:
                     pass
             await process.wait()
+
+            logger.info(
+                f"Prompt processing completed for user {user_id}, "
+                f"returncode={process.returncode}"
+            )
 
     async def answer_approval(self, answer: str) -> None:
         # Заглушка. Headless режим не поддерживает интерактивный ввод.
