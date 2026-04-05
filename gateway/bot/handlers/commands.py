@@ -55,7 +55,7 @@ async def command_sessions_handler(
         builder = InlineKeyboardBuilder()
         text_lines = ["📂 <b>Доступные сессии:</b>\n"]
         for idx, (s_id, desc) in enumerate(sessions, 1):
-            text_lines.append(f"{idx}. <code>{s_id}</code>\n   {html.escape(desc)}")
+            text_lines.append(f"{idx}. <code>{s_id}</code>\n   {html.quote(desc)}")
             builder.row(InlineKeyboardButton(text=f"Открыть #{idx} ({s_id[:6]})", callback_data=f"resume_{s_id}"))
 
         await message.answer("\n".join(text_lines), reply_markup=builder.as_markup())

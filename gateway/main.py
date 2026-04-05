@@ -5,6 +5,7 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from gateway.bot.handlers import callbacks, commands, messages, voice
 from gateway.bot.middleware.auth import AuthMiddleware
@@ -39,12 +40,13 @@ async def main() -> None:
     # Регистрация меню команд
     await bot.set_my_commands(
         [
-            {"command": "start", "description": "Запуск бота / Главное меню"},
-            {"command": "new", "description": "🔄 Новый диалог (сброс контекста)"},
-            {"command": "model", "description": "Выбрать модель Gemini"},
-            {"command": "settings", "description": "Настройки Gemini CLI"},
-            {"command": "status", "description": "Статус сессии Gemini"},
-            {"command": "help", "description": "Справка"},
+            BotCommand(command="start", description="Запуск бота / Главное меню"),
+            BotCommand(command="new", description="🔄 Новый диалог (сброс контекста)"),
+            BotCommand(command="sessions", description="📂 Загрузить прошлую сессию"),
+            BotCommand(command="model", description="Выбрать модель Gemini"),
+            BotCommand(command="settings", description="Настройки Gemini CLI"),
+            BotCommand(command="status", description="Статус сессии Gemini"),
+            BotCommand(command="help", description="Справка"),
         ]
     )
 
