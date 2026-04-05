@@ -9,6 +9,12 @@ from gateway.gemini.parser import GeminiStreamParser
 logger = logging.getLogger(__name__)
 
 
+def strip_ansi_codes(text: str) -> str:
+    """Удаляет ANSI escape коды из текста."""
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_escape.sub("", text)
+
+
 class SessionManager:
     """Управляет сессиями Gemini CLI."""
 
@@ -67,11 +73,14 @@ class SessionManager:
             "mcp",
             "list",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,  # Читаем stderr тоже
             cwd=self.config.gemini_working_dir,
         )
-        stdout, _ = await process.communicate()
-        output = stdout.decode("utf-8")
+        stdout, stderr = await process.communicate()
+        # Объединяем stdout и stderr, так как вывод может быть в любом из них
+        output = stdout.decode("utf-8") + stderr.decode("utf-8")
+        # Удаляем ANSI escape коды
+        output = strip_ansi_codes(output)
         lines = output.splitlines()
 
         logger.debug(f"Raw output from 'gemini mcp list':\n{output}")
@@ -80,12 +89,7 @@ class SessionManager:
         for line in lines:
             line = line.strip()
             # Пропускаем служебные строки
-            if (
-                not line
-                or "Configured MCP servers:" in line
-                or "Loaded cached" in line
-                or line.startswith("[")
-            ):  # ANSI escape codes
+            if not line or "Configured MCP servers:" in line or "Loaded cached" in line:
                 continue
 
             # Формат: "✓ exa: ..." или "✗ context7: ..." или "✓ chrome-devtools (from ...): ..."
@@ -110,11 +114,14 @@ class SessionManager:
             "skills",
             "list",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,  # Читаем stderr тоже
             cwd=self.config.gemini_working_dir,
         )
-        stdout, _ = await process.communicate()
-        output = stdout.decode("utf-8")
+        stdout, stderr = await process.communicate()
+        # Объединяем stdout и stderr, так как вывод может быть в любом из них
+        output = stdout.decode("utf-8") + stderr.decode("utf-8")
+        # Удаляем ANSI escape коды
+        output = strip_ansi_codes(output)
         lines = output.splitlines()
 
         logger.debug(f"Raw output from 'gemini skills list':\n{output}")
@@ -135,7 +142,6 @@ class SessionManager:
                 or "Discovered Agent Skills:" in line
                 or "Description:" in line
                 or "Location:" in line
-                or line.startswith("[")  # ANSI escape codes
                 or line.startswith("Capabilities:")
             ):
                 continue
