@@ -1,5 +1,7 @@
 # Gemini Telegram Gateway V2
 
+**Read this in other languages:** [English](README.md) | [Русский](README.ru.md)
+
 > **Repository:** [github.com/Sheme1/gemini_cli_gateway_tg](https://github.com/Sheme1/gemini_cli_gateway_tg)
 
 A modern, high-performance, and interactive Python-based Telegram Gateway for the [@google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli). It allows you to use your Gemini CLI interactive session directly from Telegram, completely keeping the context intact through long-lived processes.
