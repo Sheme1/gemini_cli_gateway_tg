@@ -11,3 +11,7 @@ __pycache__
 *.pyd
 .opencode
 .sisyphus
+.gateway_state/
+.test_runtime/
+.test_tmp/
+pytest-cache-files-*/

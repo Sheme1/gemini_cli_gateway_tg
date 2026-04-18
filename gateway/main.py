@@ -11,6 +11,7 @@ from gateway.bot.handlers import callbacks, commands, messages, voice
 from gateway.bot.middleware.auth import AuthMiddleware
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
+from gateway.user_settings import UserSettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ async def main() -> None:
 
     # Инициализация SessionManager
     session_manager = SessionManager(config=config)
+    user_settings = UserSettingsStore()
 
     # Регистрация меню команд
     await bot.set_my_commands(
@@ -44,10 +46,10 @@ async def main() -> None:
             BotCommand(command="new", description="🔄 Новый диалог (сброс контекста)"),
             BotCommand(command="sessions", description="📂 Загрузить прошлую сессию"),
             BotCommand(command="mcp", description="🔌 Управление MCP серверами"),
-            BotCommand(command="skills", description="🧠 Управление Skills"),
+            BotCommand(command="skills", description="🧠 Управление навыками"),
             BotCommand(command="model", description="Выбрать модель Gemini"),
-            BotCommand(command="settings", description="Настройки Gemini CLI"),
-            BotCommand(command="status", description="Статус сессии Gemini"),
+            BotCommand(command="settings", description="Настройки бота и вывода"),
+            BotCommand(command="status", description="Статус шлюза Gemini"),
             BotCommand(command="help", description="Справка"),
         ]
     )
@@ -55,6 +57,7 @@ async def main() -> None:
     dp = Dispatcher(
         session_manager=session_manager,
         config=config,
+        user_settings=user_settings,
     )
 
     # Регистрация middlewares

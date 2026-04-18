@@ -24,6 +24,7 @@ class Config:
     gemini_model: str = "gemini-3-flash-preview"
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
+    gemini_artifact_roots: tuple[str, ...] = field(default_factory=tuple)
     gemini_cli_timeout: int = 300  # секунды
     gemini_sandbox: bool = False
 
@@ -76,6 +77,23 @@ class Config:
                 "или не является папкой. Проверьте настройки в .env файле."
             )
 
+        artifact_roots_raw = os.getenv("GEMINI_ARTIFACT_ROOTS", "").strip()
+        artifact_roots: list[str] = []
+        if artifact_roots_raw:
+            for raw_root in artifact_roots_raw.split(","):
+                root = raw_root.strip()
+                if not root:
+                    continue
+                resolved = Path(root).expanduser().resolve()
+                if not resolved.exists() or not resolved.is_dir():
+                    raise ValueError(
+                        f"Директория GEMINI_ARTIFACT_ROOTS='{resolved}' не существует "
+                        "или не является папкой. Проверьте настройки в .env файле."
+                    )
+                artifact_roots.append(str(resolved))
+        else:
+            artifact_roots.append(str(working_dir))
+
         return cls(
             telegram_bot_token=token,
             target_chat_id=target_chat_id,
@@ -84,6 +102,7 @@ class Config:
                 "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
             ),
             gemini_working_dir=str(working_dir),
+            gemini_artifact_roots=tuple(dict.fromkeys(artifact_roots)),
             gemini_cli_timeout=int(
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
             ),

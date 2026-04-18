@@ -4,7 +4,7 @@ import re
 from typing import Callable
 
 from gateway.config import Config
-from gateway.gemini.parser import GeminiStreamParser
+from gateway.gemini.parser import GeminiStreamParser, StreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -208,9 +208,8 @@ class SessionManager:
         self,
         prompt: str,
         user_id: int,
-        on_chunk: Callable[[str], asyncio.Future],
+        on_event: Callable[[StreamEvent], asyncio.Future],
         on_approval: Callable[[dict], asyncio.Future],
-        on_file: Callable[[str], asyncio.Future] = None,
     ) -> None:
         """Отправить промпт в одноразовый процесс и стримить ответ."""
         args = [
@@ -256,7 +255,12 @@ class SessionManager:
                 if idle_time >= heartbeat_interval:
                     heartbeat_count += 1
                     elapsed_total = int(idle_time)
-                    await on_chunk(f"\n⏳ <i>Обработка... ({elapsed_total}с)</i>")
+                    await on_event(
+                        StreamEvent(
+                            event_type="heartbeat",
+                            status_message=f"Обработка... ({elapsed_total}с)",
+                        )
+                    )
                     logger.debug(f"Heartbeat #{heartbeat_count}: {elapsed_total}s idle")
 
         try:
@@ -279,21 +283,31 @@ class SessionManager:
 
                     # Проверяем был ли хоть какой-то output
                     if elapsed > 0:
-                        await on_chunk(
-                            f"\n\n⚠️ <b>Таймаут:</b> Gemini не отвечал {elapsed} секунд.\n"
-                            "Возможные причины:\n"
-                            "• Слишком сложный запрос для модели\n"
-                            "• Проблемы с MCP серверами\n"
-                            "• Зависание CLI в non-interactive режиме\n\n"
-                            "Попробуйте:\n"
-                            "• Упростить запрос\n"
-                            "• Использовать /new для сброса контекста\n"
-                            "• Повторить попытку позже"
+                        await on_event(
+                            StreamEvent(
+                                event_type="warning",
+                                warning_message=(
+                                    f"Таймаут: Gemini не отвечал {elapsed} секунд.\n"
+                                    "Возможные причины:\n"
+                                    "• Слишком сложный запрос для модели\n"
+                                    "• Проблемы с MCP-серверами\n"
+                                    "• Зависание CLI в non-interactive режиме\n\n"
+                                    "Попробуйте:\n"
+                                    "• Упростить запрос\n"
+                                    "• Использовать /new для сброса контекста\n"
+                                    "• Повторить попытку позже"
+                                ),
+                            )
                         )
                     else:
-                        await on_chunk(
-                            "\n\n⚠️ <b>Таймаут:</b> Gemini не запустился.\n"
-                            "Проверьте логи сервера."
+                        await on_event(
+                            StreamEvent(
+                                event_type="warning",
+                                warning_message=(
+                                    "Таймаут: Gemini не запустился.\n"
+                                    "Проверьте логи сервера."
+                                ),
+                            )
                         )
                     break
 
@@ -312,9 +326,9 @@ class SessionManager:
                 # Логируем события для диагностики
                 if event.event_type:
                     logger.debug(
-                        f"Event: type={event.event_type}, has_text={bool(event.text_chunk)}, "
+                        f"Event: type={event.event_type}, has_text={bool(event.assistant_text)}, "
                         f"is_done={event.is_done}, is_empty={event.is_empty_response}, "
-                        f"is_invalid={event.is_invalid_stream}"
+                        f"is_invalid={bool(event.invalid_stream_reason)}"
                     )
 
                 # Захват session_id из init-события
@@ -324,23 +338,23 @@ class SessionManager:
                         f"Captured session_id: {event.session_id} for user {user_id}"
                     )
 
-                if event.created_file and on_file:
-                    await on_file(event.created_file)
+                if event.event_type and event.event_type not in {"init", "approval_request"}:
+                    await on_event(event)
 
-                if event.text_chunk:
-                    await on_chunk(event.text_chunk)
-
-                # Обработка InvalidStream события
-                if event.is_invalid_stream:
+                if event.event_type == "invalid_stream":
                     logger.warning("Received InvalidStream event, continuing...")
                     continue
 
-                # Обработка пустого ответа
                 if event.is_empty_response:
                     logger.warning("Received empty response, notifying user...")
-                    await on_chunk(
-                        "\n\n⚠️ <i>Модель вернула пустой ответ. "
-                        "Попробуйте переформулировать запрос.</i>"
+                    await on_event(
+                        StreamEvent(
+                            event_type="warning",
+                            warning_message=(
+                                "Модель вернула пустой ответ. "
+                                "Попробуйте переформулировать запрос."
+                            ),
+                        )
                     )
                     break
 

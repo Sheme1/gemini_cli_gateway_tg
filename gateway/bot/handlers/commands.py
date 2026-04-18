@@ -4,8 +4,10 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from gateway.bot.keyboards import inline
+from gateway.bot.ui import build_settings_text
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
+from gateway.user_settings import UserSettingsStore
 
 router = Router(name="commands")
 
@@ -17,11 +19,12 @@ async def command_start_handler(
     """Обработчик команды /start"""
     text = (
         f"🤖 Добро пожаловать, {html.bold(message.from_user.full_name)}!\n\n"
-        f"Это шлюз к Gemini CLI (Headless Mode).\n"
+        f"Это Telegram-шлюз к Gemini CLI.\n"
         f"Отправьте любое сообщение, чтобы начать диалог.\n\n"
         f"Команды:\n"
         f"🔄 /new — начать новый диалог (очистить контекст)\n"
         f"📂 /sessions — список прошлых диалогов\n"
+        f"⚙️ /settings — настройки отображения и режима работы\n"
         f"ℹ️ /help — справка"
     )
     # Начинаем новую сессию
@@ -45,18 +48,18 @@ async def command_sessions_handler(
     message: Message, session_manager: SessionManager
 ) -> None:
     """Обработчик команды /sessions."""
-    await message.answer("⏳ <i>Запрашиваю список сессий...</i>", parse_mode="HTML")
+    await message.answer("⏳ <i>Запрашиваю список диалогов...</i>", parse_mode="HTML")
     try:
         sessions = await session_manager.get_sessions_list()
         if not sessions:
-            await message.answer("📂 Нет сохраненных сессий.")
+            await message.answer("📂 Сохранённые диалоги не найдены.")
             return
 
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         from aiogram.types import InlineKeyboardButton
 
         builder = InlineKeyboardBuilder()
-        text_lines = ["📂 <b>Доступные сессии:</b>\n"]
+        text_lines = ["📂 <b>Доступные диалоги:</b>\n"]
         for idx, (s_id, desc) in enumerate(sessions, 1):
             text_lines.append(f"{idx}. <code>{s_id}</code>\n   {html.quote(desc)}")
             builder.row(
@@ -79,26 +82,31 @@ async def command_mcp_handler(
     if len(args) == 1:
         # Просто показывает список
         await message.answer(
-            "⏳ <i>Гружу список MCP-серверов...</i>", parse_mode="HTML"
+            "⏳ <i>Загружаю список MCP-серверов...</i>", parse_mode="HTML"
         )
         servers = await session_manager.get_mcp_list()
 
         # Fallback для пустого списка
         if not servers:
             await message.answer(
-                "🔌 <b>MCP серверы не найдены</b>\n\n"
-                "Установите MCP серверы через <code>gemini mcp install</code>",
+                "🔌 <b>MCP-серверы не найдены</b>\n\n"
+                "Установите их через <code>gemini mcp install</code>.",
                 parse_mode="HTML",
             )
             return
 
-        text = "🔌 <b>Установленные MCP серверы:</b>\n\n"
+        text = "🔌 <b>Установленные MCP-серверы:</b>\n\n"
         for name, enabled in servers:
             icon = "🟢" if enabled else "🔴"
             status_text = "" if enabled else " <i>(отключен)</i>"
             text += f"{icon} <code>{name}</code>{status_text}\n"
 
-        text += "\n💡 Включай и выключай их кнопками ниже.\nЧтобы задействовать MCP в промпте, напиши: <code>/mcp имя запрос</code>\nИли просто упомяни <code>@имя</code> в любом сообщении."
+        text += (
+            "\n💡 Включайте и выключайте их кнопками ниже.\n"
+            "Чтобы задействовать MCP в запросе, напишите: "
+            "<code>/mcp имя_сервера запрос</code>\n"
+            "Или просто упомяните <code>@имя_сервера</code> в сообщении."
+        )
         await message.answer(
             text, reply_markup=inline.get_mcp_list_keyboard(servers), parse_mode="HTML"
         )
@@ -130,26 +138,30 @@ async def command_skills_handler(
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
         await message.answer(
-            "⏳ <i>Запрашиваю навыки (skills)...</i>", parse_mode="HTML"
+            "⏳ <i>Запрашиваю список навыков...</i>", parse_mode="HTML"
         )
         skills = await session_manager.get_skills_list()
 
         # Fallback для пустого списка
         if not skills:
             await message.answer(
-                "🧠 <b>Agent Skills не найдены</b>\n\n"
-                "Установите skills через <code>gemini skills install</code>",
+                "🧠 <b>Навыки не найдены</b>\n\n"
+                "Установите их через <code>gemini skills install</code>.",
                 parse_mode="HTML",
             )
             return
 
-        text = "🧠 <b>Установленные Агенты-Скиллы:</b>\n\n"
+        text = "🧠 <b>Установленные навыки:</b>\n\n"
         for name, enabled in skills:
             icon = "🟢" if enabled else "🔴"
             status_text = "" if enabled else " <i>(отключен)</i>"
             text += f"{icon} <code>{name}</code>{status_text}\n"
 
-        text += "\n💡 Включай и выключай скиллы кнопками ниже.\nЧтобы принудительно запустить скилл, напиши: <code>/skills имя запрос</code>"
+        text += (
+            "\n💡 Включайте и выключайте навыки кнопками ниже.\n"
+            "Чтобы принудительно запустить навык, напишите: "
+            "<code>/skills имя_навыка запрос</code>"
+        )
         await message.answer(
             text,
             reply_markup=inline.get_skills_list_keyboard(skills),
@@ -179,7 +191,7 @@ async def command_status_handler(
     message: Message, session_manager: SessionManager
 ) -> None:
     """Обработчик команды /status."""
-    status_text = "🟢 Gemini CLI: шлюз работает (Headless режим)."
+    status_text = "🟢 Gemini CLI: шлюз работает в фоновом режиме."
     await message.answer(status_text)
 
 
@@ -193,14 +205,16 @@ async def command_model_handler(message: Message, config: Config) -> None:
 
 
 @router.message(Command("settings"))
-async def command_settings_handler(message: Message, config: Config) -> None:
+async def command_settings_handler(
+    message: Message, config: Config, user_settings: UserSettingsStore
+) -> None:
     """Обработчик команды /settings — настройки CLI."""
+    render_mode = user_settings.get_render_mode(message.from_user.id)
     await message.answer(
-        "⚙️ <b>Настройки Gemini CLI</b>",
+        build_settings_text(config, render_mode),
         reply_markup=inline.get_settings_keyboard(
+            render_mode=render_mode,
             approval_mode=config.gemini_approval_mode,
-            timeout=config.gemini_cli_timeout,
-            sandbox=config.gemini_sandbox,
         ),
     )
 
@@ -209,12 +223,15 @@ async def command_settings_handler(message: Message, config: Config) -> None:
 async def command_help_handler(message: Message) -> None:
     """Обработчик команды /help."""
     text = (
-        "📖 <b>Справка по Gemini Gateway V2</b>\n\n"
+        "📖 <b>Справка по Gemini Gateway</b>\n\n"
         "Бот транслирует ваши сообщения в Gemini CLI.\n"
         "Контекст переписки сохраняется автоматически.\n\n"
         "<b>Доступные команды:</b>\n"
-        "/new - Очистить историю и сбросить сессию\n"
-        "/sessions - Загрузить предыдущие диалоги\n"
-        "/settings - Настройки\n"
+        "/new — очистить историю и начать новый диалог\n"
+        "/sessions — открыть один из прошлых диалогов\n"
+        "/mcp — просмотреть MCP-серверы\n"
+        "/skills — просмотреть навыки\n"
+        "/settings — открыть настройки отображения и режима работы\n"
+        "/status — проверить состояние шлюза\n"
     )
     await message.answer(text)

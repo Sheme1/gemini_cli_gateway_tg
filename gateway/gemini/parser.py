@@ -1,49 +1,119 @@
+from __future__ import annotations
+
 import json
 import logging
 import re
-from dataclasses import dataclass
-from html import escape as html_escape
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-# Compiled once at module level for performance
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_SEND_FILE_RE = re.compile(r"\[SEND_FILE:\s*(.+?)\]")
+_FILE_TOKEN_RE = re.compile(
+    r"(?P<path>"
+    r"(?:~|/|[A-Za-z]:[\\/]|\.{1,2}[\\/])?[^\s<>'\"`]+"
+    r"(?:[\\/][^\s<>'\"`]+)*"
+    r"\.[A-Za-z0-9]{1,10}"
+    r")"
+)
+_LIKELY_ARTIFACT_EXTENSIONS = {
+    ".csv",
+    ".doc",
+    ".docx",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".md",
+    ".ods",
+    ".odt",
+    ".pdf",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".svg",
+    ".tar",
+    ".tgz",
+    ".tsv",
+    ".txt",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".zip",
+}
 
 
 @dataclass
 class StreamEvent:
-    text_chunk: str = ""
-    is_done: bool = False
-    approval_request: Optional[dict] = None
-    created_file: Optional[str] = None
-    session_id: Optional[str] = None
     event_type: str = ""
+    assistant_text: str = ""
+    tool_name: str = ""
+    tool_args_preview: str = ""
+    tool_output_preview: str = ""
+    approval_request: Optional[dict[str, Any]] = None
+    file_candidates: list[str] = field(default_factory=list)
+    direct_file_candidates: list[str] = field(default_factory=list)
+    session_id: Optional[str] = None
+    total_tokens: int = 0
+    duration_ms: int = 0
+    thoughts_tokens: int = 0
+    error_message: str = ""
+    invalid_stream_reason: str = ""
+    status_message: str = ""
+    warning_message: str = ""
+    is_done: bool = False
     is_empty_response: bool = False
-    is_invalid_stream: bool = False
+
+
+def _dedupe(values: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _stringify_payload(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _normalize_path_candidate(raw_value: str) -> str:
+    candidate = raw_value.strip().strip("\"'`")
+    candidate = candidate.rstrip(".,;:)]}>")
+    candidate = candidate.lstrip("([{<")
+    return candidate.strip()
+
+
+def _looks_like_artifact(candidate: str) -> bool:
+    lowered = candidate.lower()
+    if "/" in candidate or "\\" in candidate or candidate.startswith("~"):
+        return True
+    for ext in _LIKELY_ARTIFACT_EXTENSIONS:
+        if lowered.endswith(ext):
+            return True
+    return False
+
+
+def _extract_file_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in _FILE_TOKEN_RE.finditer(text):
+        candidate = _normalize_path_candidate(match.group("path"))
+        if candidate and _looks_like_artifact(candidate):
+            candidates.append(candidate)
+    return _dedupe(candidates)
 
 
 class GeminiStreamParser:
-    """Парсер для --output-format stream-json Gemini CLI.
-
-    Формат вывода (JSONL):
-      {"type":"init","session_id":"...","model":"..."}
-      {"type":"message","role":"user","content":"..."}
-      {"type":"message","role":"assistant","content":"...","delta":true}
-      {"type":"tool_use","name":"bash","args":{"command":"ls"}}
-      {"type":"tool_result","output":"..."}
-      {"type":"result","status":"success","stats":{...}}
-      {"type":"error","message":"..."}
-      {"type":"invalid_stream","reason":"NO_RESPONSE_TEXT"}
-    """
+    """Парсер для --output-format stream-json Gemini CLI."""
 
     @staticmethod
     def parse_line(line: str) -> StreamEvent:
-        """Парсит одну строку stream-json."""
         if not line or not line.strip():
             return StreamEvent()
 
-        # Очистка ANSI escape-кодов
         clean_line = _ANSI_ESCAPE_RE.sub("", line).strip()
         if not clean_line:
             return StreamEvent()
@@ -51,92 +121,109 @@ class GeminiStreamParser:
         try:
             data = json.loads(clean_line)
         except json.JSONDecodeError:
-            logger.debug(f"[RAW NON-JSON] {clean_line!r}")
+            logger.debug("[RAW NON-JSON] %r", clean_line)
             return StreamEvent()
 
-        event_type = data.get("type", "")
-        event = StreamEvent(event_type=event_type)
+        raw_type = data.get("type", "")
 
-        # === init: метаданные сессии ===
-        if event_type == "init":
-            event.session_id = data.get("session_id")
+        if raw_type == "init":
+            session_id = data.get("session_id")
             logger.info(
-                f"Gemini session init: id={event.session_id}, model={data.get('model')}"
+                "Gemini session init: id=%s, model=%s",
+                session_id,
+                data.get("model"),
             )
-            return event
+            return StreamEvent(event_type="init", session_id=session_id)
 
-        # === message: текст от ассистента ===
-        if event_type == "message":
+        if raw_type == "message":
             role = data.get("role", "")
-            content = data.get("content", "")
+            content = _stringify_payload(data.get("content"))
+            if role != "assistant" or not content:
+                return StreamEvent()
 
-            if role == "assistant" and content:
-                # Поиск тега отправки файла (напр. [SEND_FILE: /path/to/img.png])
-                send_file_match = re.search(r"\[SEND_FILE:\s*(.+?)\]", content)
-                if send_file_match:
-                    # Захватываем путь и удаляем тег из отображаемого контента
-                    event.created_file = send_file_match.group(1).strip()
-                    content = content.replace(send_file_match.group(0), "").strip()
+            direct_candidates = [
+                _normalize_path_candidate(match)
+                for match in _SEND_FILE_RE.findall(content)
+            ]
+            content = _SEND_FILE_RE.sub("", content).strip()
+            inferred_candidates = _extract_file_candidates(content)
 
-                if content:
-                    # Экранируем HTML-спецсимволы из текста Gemini
-                    event.text_chunk = html_escape(content)
-            return event
+            return StreamEvent(
+                event_type="assistant_text",
+                assistant_text=content,
+                file_candidates=_dedupe([*direct_candidates, *inferred_candidates]),
+                direct_file_candidates=_dedupe(direct_candidates),
+            )
 
-        # === tool_use: вызов инструмента ===
-        if event_type == "tool_use":
-            tool_name = html_escape(data.get("name", "unknown"))
-            args = data.get("args", {})
-            args_preview = html_escape(json.dumps(args, ensure_ascii=False))
-            if len(args_preview) > 200:
-                args_preview = args_preview[:200] + "..."
-            event.text_chunk = f"\n\n🔧 <b>{tool_name}</b>\n<pre>{args_preview}</pre>\n"
-            return event
+        if raw_type == "tool_use":
+            tool_name = _stringify_payload(data.get("name")).strip()
+            args_preview = _stringify_payload(data.get("args"))
+            if len(args_preview) > 400:
+                args_preview = args_preview[:400].rstrip() + "..."
+            return StreamEvent(
+                event_type="tool_use",
+                tool_name=tool_name,
+                tool_args_preview=args_preview,
+                file_candidates=_extract_file_candidates(args_preview),
+            )
 
-        # === tool_result: результат инструмента ===
-        if event_type == "tool_result":
-            output = data.get("output", "")
-            if output:
-                preview = html_escape(
-                    output[:500] + "..." if len(output) > 500 else output
-                )
-                event.text_chunk = f"\n📋 <pre>{preview}</pre>\n"
-            return event
+        if raw_type == "tool_result":
+            output_preview = _stringify_payload(data.get("output"))
+            if len(output_preview) > 700:
+                output_preview = output_preview[:700].rstrip() + "..."
+            return StreamEvent(
+                event_type="tool_result",
+                tool_output_preview=output_preview,
+                file_candidates=_extract_file_candidates(output_preview),
+            )
 
-        # === result: завершение ===
-        if event_type == "result":
-            event.is_done = True
-            stats = data.get("stats", {})
-            total = stats.get("total_tokens", 0)
-            duration = stats.get("duration_ms", 0)
+        if raw_type in {"approval_request", "confirmation_request"}:
+            request_payload = data if isinstance(data, dict) else None
+            return StreamEvent(
+                event_type="approval_request",
+                approval_request=request_payload,
+            )
 
-            # Проверка на пустой ответ (только thought tokens или нулевые токены)
-            thoughts_tokens = stats.get("thoughts_tokens", 0)
-            if total == 0 or (thoughts_tokens > 0 and total == thoughts_tokens):
-                event.is_empty_response = True
+        if raw_type == "result":
+            stats = data.get("stats", {}) if isinstance(data.get("stats"), dict) else {}
+            total_tokens = int(stats.get("total_tokens", 0) or 0)
+            duration_ms = int(stats.get("duration_ms", 0) or 0)
+            thoughts_tokens = int(stats.get("thoughts_tokens", 0) or 0)
+            is_empty = total_tokens == 0 or (
+                thoughts_tokens > 0 and total_tokens == thoughts_tokens
+            )
+
+            if is_empty:
                 logger.warning(
-                    f"Detected empty response: total={total}, thoughts={thoughts_tokens}"
+                    "Detected empty response: total=%s, thoughts=%s",
+                    total_tokens,
+                    thoughts_tokens,
                 )
 
-            if total or duration:
-                event.text_chunk = (
-                    f"\n\n📊 <i>Токены: {total} · {duration / 1000:.1f}с</i>"
-                )
-            return event
+            return StreamEvent(
+                event_type="result_stats",
+                total_tokens=total_tokens,
+                duration_ms=duration_ms,
+                thoughts_tokens=thoughts_tokens,
+                is_done=True,
+                is_empty_response=is_empty,
+            )
 
-        # === error: ошибка ===
-        if event_type == "error":
-            error_msg = html_escape(data.get("message", "Неизвестная ошибка"))
-            event.text_chunk = f"\n\n⚠️ <b>Ошибка:</b> {error_msg}"
-            return event
+        if raw_type == "error":
+            return StreamEvent(
+                event_type="error",
+                error_message=_stringify_payload(
+                    data.get("message", "Неизвестная ошибка")
+                ),
+            )
 
-        # === invalid_stream: проблема со стримом ===
-        if event_type == "invalid_stream":
-            event.is_invalid_stream = True
-            reason = data.get("reason", "UNKNOWN")
-            logger.warning(f"InvalidStream event: reason={reason}")
-            event.text_chunk = f"\n\n⚠️ <i>Проблема со стримом: {reason}</i>"
-            return event
+        if raw_type == "invalid_stream":
+            reason = _stringify_payload(data.get("reason", "UNKNOWN"))
+            logger.warning("InvalidStream event: reason=%s", reason)
+            return StreamEvent(
+                event_type="invalid_stream",
+                invalid_stream_reason=reason,
+            )
 
-        logger.debug(f"[UNKNOWN EVENT] type={event_type}, data={data}")
-        return event
+        logger.debug("[UNKNOWN EVENT] type=%s, data=%s", raw_type, data)
+        return StreamEvent()

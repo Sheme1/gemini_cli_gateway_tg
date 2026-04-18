@@ -6,8 +6,18 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 
 from gateway.bot.keyboards import inline
+from gateway.bot.ui import (
+    APPROVAL_MODE_DESCRIPTIONS,
+    APPROVAL_MODE_LABELS,
+    RENDER_MODE_DESCRIPTIONS,
+    RENDER_MODE_LABELS,
+    build_settings_text,
+    get_approval_mode_label,
+    get_render_mode_label,
+)
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
+from gateway.user_settings import UserSettingsStore
 
 logger = logging.getLogger(__name__)
 router = Router(name="callbacks")
@@ -55,8 +65,8 @@ async def callback_resume_session(
     await session_manager.set_active_session(callback.from_user.id, session_id)
 
     await callback.message.edit_text(
-        f"✅ <b>Сессия выбрана:</b> <code>{session_id}</code>\n"
-        f"Все последующие запросы будут отправлены в этот контекст.",
+        f"✅ <b>Диалог выбран:</b> <code>{session_id}</code>\n"
+        "Все последующие запросы будут отправлены в этот контекст.",
         reply_markup=None,
     )
     await callback.answer()
@@ -82,9 +92,9 @@ async def callback_interactive_approve(
     await callback.message.edit_reply_markup(reply_markup=None)
 
     if answer == "yes":
-        await callback.message.reply("✅ Действие одобрено")
+        await callback.message.reply("✅ Действие одобрено.")
     else:
-        await callback.message.reply("❌ Действие отклонено")
+        await callback.message.reply("❌ Действие отклонено.")
 
     await callback.answer()
 
@@ -94,13 +104,15 @@ async def callback_interactive_approve(
 
 @router.callback_query(F.data == "settings:main")
 @router.callback_query(F.data == "settings")
-async def callback_settings_main(callback: CallbackQuery, config: Config) -> None:
+async def callback_settings_main(
+    callback: CallbackQuery, config: Config, user_settings: UserSettingsStore
+) -> None:
     """Главное меню настроек."""
-    text = "⚙️ <b>Настройки Gemini CLI</b>"
+    render_mode = user_settings.get_render_mode(callback.from_user.id)
+    text = build_settings_text(config, render_mode)
     kb = inline.get_settings_keyboard(
+        render_mode=render_mode,
         approval_mode=config.gemini_approval_mode,
-        timeout=config.gemini_cli_timeout,
-        sandbox=config.gemini_sandbox,
     )
 
     if callback.message.text:
@@ -110,12 +122,59 @@ async def callback_settings_main(callback: CallbackQuery, config: Config) -> Non
     await callback.answer()
 
 
+@router.callback_query(F.data == "settings:render")
+async def callback_settings_render(
+    callback: CallbackQuery, user_settings: UserSettingsStore
+) -> None:
+    """Меню выбора режима отображения."""
+    current_mode = user_settings.get_render_mode(callback.from_user.id)
+    descriptions = "\n".join(
+        f"• <b>{RENDER_MODE_LABELS[mode]}</b> — {RENDER_MODE_DESCRIPTIONS[mode]}"
+        for mode in RENDER_MODE_LABELS
+    )
+    await callback.message.edit_text(
+        "Выберите режим отображения:\n\n" + descriptions,
+        reply_markup=inline.get_render_modes_keyboard(current_mode),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_render:"))
+async def callback_set_render(
+    callback: CallbackQuery, config: Config, user_settings: UserSettingsStore
+) -> None:
+    """Установка режима отображения для пользователя."""
+    new_mode = callback.data.split(":")[1]
+    current_mode = user_settings.get_render_mode(callback.from_user.id)
+
+    if new_mode == current_mode:
+        await callback.answer("Этот режим уже выбран.")
+        return
+
+    user_settings.set_render_mode(callback.from_user.id, new_mode)
+    render_mode = user_settings.get_render_mode(callback.from_user.id)
+    await callback.message.edit_text(
+        build_settings_text(config, render_mode),
+        reply_markup=inline.get_settings_keyboard(
+            render_mode=render_mode,
+            approval_mode=config.gemini_approval_mode,
+        ),
+    )
+    await callback.answer(
+        f"Режим отображения: {get_render_mode_label(render_mode)}."
+    )
+
+
 @router.callback_query(F.data == "settings:approval")
 async def callback_settings_approval(callback: CallbackQuery, config: Config) -> None:
     """Меню выбора режима approval."""
-    kb = inline.get_approval_modes_keyboard(config.gemini_approval_mode)
+    descriptions = "\n".join(
+        f"• <b>{APPROVAL_MODE_LABELS[mode]}</b> — {APPROVAL_MODE_DESCRIPTIONS[mode]}"
+        for mode in APPROVAL_MODE_LABELS
+    )
     await callback.message.edit_text(
-        "Выберите режим подтверждения действий (--approval-mode):", reply_markup=kb
+        "Выберите режим подтверждений:\n\n" + descriptions,
+        reply_markup=inline.get_approval_modes_keyboard(config.gemini_approval_mode),
     )
     await callback.answer()
 
@@ -128,17 +187,18 @@ async def callback_set_approval(
     new_mode = callback.data.split(":")[1]
 
     if new_mode == config.gemini_approval_mode:
-        await callback.answer("Этот режим уже установлен")
+        await callback.answer("Этот режим уже выбран.")
         return
 
     object.__setattr__(config, "gemini_approval_mode", new_mode)
 
     await callback.message.edit_text(
-        f"🔄 Режим установлен: <b>{new_mode}</b>.\nТекущий диалог сброшен.",
+        f"🔄 Режим подтверждений изменён: <b>{get_approval_mode_label(new_mode)}</b>.\n"
+        "Текущий диалог сброшен.",
         reply_markup=None,
     )
     await session_manager.reset(callback.from_user.id)
-    await callback.message.answer("✅ Готово. Новый режим применен.")
+    await callback.message.answer("✅ Готово. Новый режим применён.")
     await callback.answer()
 
 
