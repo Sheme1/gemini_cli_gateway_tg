@@ -389,7 +389,10 @@ class SessionManager:
                         f"Captured session_id: {event.session_id} for user {user_id}"
                     )
 
-                if event.event_type and event.event_type not in {"init", "approval_request"}:
+                if event.event_type and event.event_type not in {
+                    "init",
+                    "approval_request",
+                }:
                     await on_event(event)
 
                 if event.event_type == "invalid_stream":

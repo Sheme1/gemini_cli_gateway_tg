@@ -25,7 +25,7 @@ class Config:
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
     gemini_artifact_roots: tuple[str, ...] = field(default_factory=tuple)
-    gemini_cli_timeout: int = 300  # секунды
+    gemini_cli_timeout: int = 600  # секунды
     gemini_sandbox: bool = False
     gemini_stream_debug: bool = False
     gemini_soft_finalize_idle_seconds: int = 90

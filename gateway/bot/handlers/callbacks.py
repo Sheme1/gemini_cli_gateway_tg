@@ -160,9 +160,7 @@ async def callback_set_render(
             approval_mode=config.gemini_approval_mode,
         ),
     )
-    await callback.answer(
-        f"Режим отображения: {get_render_mode_label(render_mode)}."
-    )
+    await callback.answer(f"Режим отображения: {get_render_mode_label(render_mode)}.")
 
 
 @router.callback_query(F.data == "settings:approval")

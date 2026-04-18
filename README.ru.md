@@ -1,612 +1,341 @@
-# Gemini Telegram Gateway V2
+# Gemini Telegram Gateway
 
-**Читать на других языках:** [English](README.md) | [Русский](README.ru.md)
+**Языки:** [English](README.md) | [Русский](README.ru.md)
 
-> **Репозиторий:** [github.com/Sheme1/gemini_cli_gateway_tg](https://github.com/Sheme1/gemini_cli_gateway_tg)
+Telegram-шлюз для [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) на Python и aiogram. Он позволяет работать с Gemini из Telegram, сохранять контекст между сообщениями, стримить частичные ответы и автоматически отправлять в чат сгенерированные файлы.
 
-Современный, высокопроизводительный и интерактивный Telegram-шлюз на Python для [@google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli). Позволяет использовать интерактивную сессию Gemini CLI напрямую из Telegram, полностью сохраняя контекст через долгоживущие процессы.
+Репозиторий: [github.com/Sheme1/gemini_cli_gateway_tg](https://github.com/Sheme1/gemini_cli_gateway_tg)
 
----
+## Обзор
 
-## 📋 Содержание
+Проект сейчас ориентирован на один основной production-сценарий:
 
-- [Возможности](#возможности)
-- [Требования](#требования)
-- [Быстрый старт](#быстрый-старт)
-- [Конфигурация](#конфигурация)
-- [Production развёртывание](#production-развёртывание)
-  - [Systemd (рекомендуется)](#systemd-рекомендуется)
-  - [Docker](#docker)
-- [Команды бота](#команды-бота)
-- [Расширенные возможности](#расширенные-возможности)
-  - [Управление MCP серверами](#управление-mcp-серверами)
-  - [Управление Skills](#управление-skills)
-  - [Режимы подтверждения](#режимы-подтверждения)
-  - [Голосовые сообщения](#голосовые-сообщения)
-- [Разработка](#разработка)
-- [Решение проблем](#решение-проблем)
-- [Участие в проекте](#участие-в-проекте)
+- Linux-хост
+- `systemd`-сервис `telegram-gateway`
+- Gemini CLI установлен у того же пользователя, который владеет репозиторием и состоянием аутентификации Gemini CLI
 
----
+Локальный запуск `python -m gateway.main` по-прежнему поддерживается, но предназначен для разработки и быстрой локальной проверки, а не как основной способ фонового production-запуска.
 
-## ✨ Возможности
+## Актуальная Модель Работы
 
-- **Нулевые холодные старты:** Держит `gemini` CLI запущенным в фоне как интерактивный постоянный процесс
-- **Сохранение контекста:** Контекст диалога накапливается непрерывно. Легко очистить в любой момент через `/new`
-- **JSON стриминг:** Плавный опыт набора текста в Telegram через обработку `stream-json` и ограничение частоты обновлений
-- **Голосовые сообщения:** Поддержка аудио сообщений. Бот безопасно транскрибирует их через Gemini API и передаёт в чат
-- **Интерактивные подтверждения действий:** Когда CLI требует разрешения на использование инструментов, бот предоставляет элегантные inline-кнопки (Одобрить / Отклонить / YOLO)
-- **Управление прямо из Telegram:** Меняйте модели `gemini-cli` или переключайте режимы подтверждения прямо в чате
-- **Интеграция MCP серверов:** Включайте/выключайте MCP серверы на лету с помощью inline-кнопок
-- **Управление Skills:** Управляйте навыками Gemini CLI прямо из Telegram
-- **Управление сессиями:** Возобновляйте предыдущие разговоры из истории
-- **Ограничение частоты запросов:** Встроенная защита от спама и злоупотребления API
+Шлюз **больше не** держит один постоянный интерактивный процесс Gemini CLI.
 
----
+Текущее поведение:
 
-## 🔧 Требования
+1. Каждый Telegram-запрос запускает отдельный headless-процесс `gemini -p ... -o stream-json`.
+2. Gemini возвращает `session_id` в событии `init`.
+3. Шлюз сохраняет активный `session_id` отдельно для каждого Telegram-пользователя.
+4. Следующие запросы продолжают контекст через `--resume <session_id>`.
 
-- **Python 3.12+** 
-- **Node.js** (для Gemini CLI)
-- **Gemini CLI** установлен глобально:
-  ```bash
-  npm install -g @google/gemini-cli
-  ```
-- **Telegram Bot Token** (получить у [@BotFather](https://t.me/BotFather))
-- **Gemini API Key** (опционально, для транскрибации голоса)
+Так сохраняется история диалога, но без зависимости от одного вечного CLI-процесса.
 
----
+## Что Сейчас Поддерживает Шлюз
 
-## 🚀 Быстрый старт
+- Сохранение контекста по пользователю через `session_id` + `--resume`
+- Потоковые обновления Telegram-сообщения из Gemini `stream-json`
+- Три режима отображения прогресса инструментов: `compact`, `summary`, `detailed`
+- UI для просмотра и переключения MCP-серверов
+- UI для просмотра и переключения Gemini skills
+- Транскрибация голосовых сообщений через Gemini API
+- Автоматическое обнаружение артефактов и отправка файлов обратно в Telegram
+- Soft finalize, если Gemini не прислал финальный `result`, но итоговый файл уже стабилизировался
+- Опциональное ограничение входящих сообщений по `TARGET_CHAT_ID`
 
-### 1. Клонировать репозиторий
+## Важные Ограничения
+
+- Inline-интерфейс подтверждений уже есть, и запросы подтверждения детектятся, но полноценное продолжение выполнения из Telegram пока ограничено в headless-потоке, потому что `SessionManager.answer_approval()` сейчас остаётся заглушкой.
+- Для продакшна лучше использовать `GEMINI_APPROVAL_MODE=yolo`, `auto_edit` или `plan`.
+- `APPROVAL_TIMEOUT` загружается из конфига, но в текущем headless-потоке подтверждений активно не применяется.
+- Автоотправка оптимизирована под распространённые форматы документов, изображений, таблиц, архивов и презентаций. Файлы-спутники вроде `.md` тоже можно отправлять, если Gemini явно сослался на них в выводе.
+
+## Структура Проекта
+
+```text
+gemini_cli_gateway_tg/
+├── gateway/
+│   ├── main.py
+│   ├── config.py
+│   ├── artifacts.py
+│   ├── user_settings.py
+│   ├── bot/
+│   │   ├── handlers/
+│   │   ├── keyboards/
+│   │   ├── middleware/
+│   │   └── ui.py
+│   ├── gemini/
+│   │   ├── parser.py
+│   │   ├── renderer.py
+│   │   └── session.py
+│   └── streaming/
+│       └── editor.py
+├── tests/
+├── install.sh
+├── telegram-gateway.service
+├── Dockerfile
+└── docker-compose.yml
+```
+
+## Требования
+
+- Python 3.12+
+- Node.js + npm
+- `@google/gemini-cli`, установленный у пользователя сервиса
+- уже выполненная аутентификация Gemini CLI у этого же пользователя
+- токен Telegram-бота от [@BotFather](https://t.me/BotFather)
+- опционально Gemini API key для голосовой транскрибации
+
+## Быстрый Локальный Запуск
+
+Это рекомендуемый путь для локальной разработки, но не для production-демонизации.
 
 ```bash
 git clone https://github.com/Sheme1/gemini_cli_gateway_tg.git
 cd gemini_cli_gateway_tg
-```
 
-### 2. Настроить виртуальное окружение и установить зависимости
-
-```bash
 python3 -m venv .venv
-source .venv/bin/activate  # На Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
 
-### 3. Настроить бота
+npm install -g @google/gemini-cli
 
-Скопируйте пример конфигурации и отредактируйте его:
-
-```bash
 cp .env.example .env
-nano .env  # или используйте ваш любимый редактор
-```
+# отредактируйте .env
 
-**Обязательные настройки:**
-- `TELEGRAM_BOT_TOKEN` — токен вашего бота от @BotFather
-
-**Опциональные настройки:**
-- `TARGET_CHAT_ID` — ограничить доступ к боту определённым chat ID
-- `GEMINI_API_KEY` — для транскрибации голосовых сообщений
-- `GEMINI_MODEL` — модель по умолчанию (gemini-3-flash-preview)
-- `GEMINI_APPROVAL_MODE` — yolo / default / auto_edit / plan
-- `GEMINI_WORKING_DIR` — рабочая директория для CLI (по умолчанию: `~`)
-
-### 4. Запустить бота
-
-```bash
 python -m gateway.main
 ```
 
-Бот должен запуститься! Откройте Telegram и отправьте `/start` вашему боту.
+На Windows активируйте окружение через `.venv\Scripts\activate`.
 
----
+## Конфигурация
 
-## ⚙️ Конфигурация
+Вся runtime-конфигурация задаётся через `.env`.
 
-Вся конфигурация выполняется через файл `.env`. Вот полный справочник:
+| Переменная | Значение по умолчанию | Описание |
+| --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | нет | Обязательный токен Telegram-бота. |
+| `TARGET_CHAT_ID` | пусто | Опциональное ограничение входящих сообщений одним chat ID. |
+| `GEMINI_MODEL` | `gemini-3-flash-preview` | Модель, передаваемая в `gemini -m`. |
+| `GEMINI_APPROVAL_MODE` | `yolo` | Режим approval для Gemini CLI. Поддерживаются `default`, `auto_edit`, `yolo`, `plan`. |
+| `GEMINI_WORKING_DIR` | домашняя директория пользователя | Рабочая папка для запуска Gemini-процессов. |
+| `GEMINI_ARTIFACT_ROOTS` | `GEMINI_WORKING_DIR` | Список директорий через запятую, где искать созданные файлы. |
+| `GEMINI_CLI_TIMEOUT` | `600` | Таймаут неактивности одного Gemini-запроса. `600` секунд рекомендуется для долгих MCP/skill операций. |
+| `GEMINI_SANDBOX` | `false` | Добавляет `--sandbox` к вызовам Gemini CLI. |
+| `GEMINI_STREAM_DEBUG` | `false` | Включает сырые логи `stream-json` и диагностический вывод парсера. |
+| `GEMINI_SOFT_FINALIZE_IDLE_SECONDS` | `90` | Порог мягкого завершения после отправки файла, если Gemini так и не прислал финальный `result`. |
+| `ARTIFACT_WATCH_INTERVAL` | `1.0` | Интервал опроса готовности артефактов, пока запрос ещё выполняется. |
+| `ARTIFACT_STABLE_SECONDS` | `5.0` | Сколько секунд файл должен не меняться перед автоотправкой. |
+| `GEMINI_API_KEY` | пусто | Включает транскрибацию голосовых сообщений через Gemini API. |
+| `STREAM_UPDATE_INTERVAL` | `1.5` | Минимальная задержка между edit-сообщениями в Telegram. |
+| `APPROVAL_TIMEOUT` | `120` | Резервный параметр UI подтверждений; сейчас не применяется в headless-потоке подтверждений. |
+| `LOG_LEVEL` | `INFO` | Уровень логирования приложения. |
 
-### Настройки Telegram
+## Команды Бота
+
+| Команда | Что делает |
+| --- | --- |
+| `/start` | Сбрасывает текущую пользовательскую сессию и показывает основную справку. |
+| `/new` | Очищает сохранённую Gemini-сессию для текущего пользователя. |
+| `/sessions` | Показывает список сессий Gemini из истории CLI и позволяет выбрать одну. |
+| `/mcp` | Показывает установленные MCP-серверы и кнопки переключения. |
+| `/mcp <server> <prompt>` | Принудительно отправляет запрос через `@server ...`. |
+| `/skills` | Показывает установленные Gemini skills и кнопки переключения. |
+| `/skills <skill> <prompt>` | Принудительно отправляет запрос через `@skill ...`. |
+| `/model` | Открывает inline-выбор модели. |
+| `/settings` | Показывает render mode, approval mode, timeout и sandbox state; позволяет менять render и approval режимы. |
+| `/status` | Возвращает простой статус работоспособности шлюза. |
+| `/help` | Показывает краткую справку по командам. |
+
+## Поведение Во Время Работы
+
+### Стриминг и Рендеринг
+
+- Вывод Gemini разбирается из newline-delimited событий `stream-json`.
+- Частота обновлений Telegram ограничивается через `STREAM_UPDATE_INTERVAL`.
+- Длинные ответы безопасно режутся, чтобы не выйти за лимит Telegram в 4096 символов.
+- Пользовательские предпочтения по отображению сохраняются в `.gateway_state/user_settings.json`.
+
+### Отправка Артефактов
+
+- Шлюз ищет кандидатов на отправку в assistant text, tool arguments и tool results.
+- Распространённые форматы вроде `.docx`, `.pdf`, `.xlsx`, `.pptx`, `.png`, `.jpg`, `.zip` отправляются автоматически.
+- Явные маркеры `[SEND_FILE: path]` из вывода Gemini тоже поддерживаются.
+- Если файл стабилизировался раньше, чем Gemini прислал финальный `result`, шлюз может отправить файл и мягко завершить ответ в Telegram.
+
+### Голосовой Поток
+
+- Голосовые сообщения скачиваются из Telegram, отправляются в Gemini API на транскрибацию и затем передаются в Gemini CLI как текст.
+- Для голосовой поддержки нужен `GEMINI_API_KEY`.
+
+## Production-Развёртывание Через systemd
+
+`systemd` — основной production-target для этого проекта.
+
+### Подготовка хоста
+
+Установите Python, Node.js, npm и Gemini CLI любым удобным для вашей системы способом. Затем под тем же пользователем, который будет владельцем сервиса:
 
 ```bash
-TELEGRAM_BOT_TOKEN=your_token_here          # Обязательно: токен бота от @BotFather
-TARGET_CHAT_ID=                             # Опционально: ограничить доступ к определённому chat ID
-```
-
-### Настройки Gemini CLI
-
-```bash
-GEMINI_MODEL=gemini-3-flash-preview         # Модель по умолчанию
-GEMINI_APPROVAL_MODE=yolo                   # Режим подтверждения: default/auto_edit/yolo/plan
-GEMINI_WORKING_DIR=/home/user/projects      # Рабочая директория (по умолчанию: ~)
-GEMINI_CLI_TIMEOUT=300                      # Таймаут в секундах
-GEMINI_SANDBOX=false                        # Запуск в режиме песочницы
-```
-
-### Gemini API (для голосовых сообщений)
-
-```bash
-GEMINI_API_KEY=                             # API ключ для транскрибации голоса
-```
-
-### Настройки стриминга
-
-```bash
-STREAM_UPDATE_INTERVAL=1.5                  # Секунды между обновлениями сообщений
-```
-
-### Настройки подтверждений
-
-```bash
-APPROVAL_TIMEOUT=120                        # Секунды до авто-отклонения
-```
-
-### Логирование
-
-```bash
-LOG_LEVEL=INFO                              # DEBUG / INFO / WARNING / ERROR
-```
-
----
-
-## 🚢 Production развёртывание
-
-### Systemd (рекомендуется)
-
-Systemd обеспечивает автоматический запуск бота при загрузке системы и перезапуск при сбоях.
-
-#### Автоматическая установка (рекомендуется)
-
-Используйте скрипт автоматической установки — он всё настроит за вас:
-
-```bash
-# Убедитесь, что вы в директории проекта
+git clone https://github.com/Sheme1/gemini_cli_gateway_tg.git
 cd gemini_cli_gateway_tg
 
-# Сделайте скрипт исполняемым
-chmod +x install.sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-# Запустите установку
+npm install -g @google/gemini-cli
+
+cp .env.example .env
+# отредактируйте .env
+```
+
+Важно:
+
+- Запускайте `install.sh` от того же пользователя, у которого `gemini` уже успешно работает.
+- Если Gemini CLI установлен через `nvm` или другой user-local toolchain, убедитесь, что перед запуском установщика команды `gemini` и `node` доступны в текущем shell.
+- Установщик не ставит Python, Node.js, npm, не создаёт `.env` и `.venv`. Он только рендерит и регистрирует `systemd`-unit.
+
+### Автоматическая установка сервиса
+
+```bash
+chmod +x install.sh
 ./install.sh
 ```
 
-Скрипт автоматически:
-- ✅ Определит текущего пользователя и пути
-- ✅ Проверит наличие `.env` и виртуального окружения
-- ✅ Создаст systemd service файл с правильными путями
-- ✅ Установит и запустит сервис
-- ✅ Включит автозапуск при загрузке системы
+Установщик:
 
-**Требования перед запуском:**
-1. Создать `.env` файл: `cp .env.example .env && nano .env`
-2. Установить зависимости: `pip install -r requirements.txt`
-3. Установить Gemini CLI: `npm install -g @google/gemini-cli`
+- определяет корень проекта по расположению самого скрипта, а не по текущей директории shell
+- проверяет Linux + `systemd` + `sudo`
+- проверяет `.env`, `.venv/bin/python`, `gemini` и `node`
+- рендерит `telegram-gateway.service` с конкретными путями
+- добавляет `PATH`, в который входят найденные каталоги бинарников Gemini и Node
+- устанавливает или обновляет `/etc/systemd/system/telegram-gateway.service`
+- делает `daemon-reload`, включает сервис и запускает или перезапускает его
 
----
-
-#### Ручная установка (альтернатива)
-
-Если предпочитаете настроить всё вручную:
-
-<details>
-<summary>Развернуть инструкцию по ручной установке</summary>
-
-##### 1. Отредактировать service файл
-
-Откройте `telegram-gateway.service` в редакторе и обновите пути:
+### Управление сервисом
 
 ```bash
-nano telegram-gateway.service
-```
-
-Найдите секцию `[Service]` и измените эти строки:
-
-```ini
-[Service]
-User=your_username                          # Замените на ваше имя пользователя (например: User=ubuntu)
-WorkingDirectory=/path/to/gemini_cli_gateway_tg    # Полный путь к директории проекта (например: /home/ubuntu/gemini_cli_gateway_tg)
-EnvironmentFile=/path/to/gemini_cli_gateway_tg/.env    # Полный путь к .env файлу
-ExecStart=/path/to/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main    # Полный путь к python в venv
-```
-
-**Пример для пользователя `ubuntu` с проектом в `/home/ubuntu/gemini_cli_gateway_tg`:**
-
-```ini
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/gemini_cli_gateway_tg
-EnvironmentFile=/home/ubuntu/gemini_cli_gateway_tg/.env
-ExecStart=/home/ubuntu/gemini_cli_gateway_tg/.venv/bin/python -m gateway.main
-```
-
-**Как узнать свои пути:**
-- Имя пользователя: `whoami`
-- Текущая директория: `pwd` (выполните в папке проекта)
-
-##### 2. Установить и включить сервис
-
-```bash
-# Скопировать service файл в директорию systemd
-sudo cp telegram-gateway.service /etc/systemd/system/
-
-# Перезагрузить systemd для распознавания нового сервиса
-sudo systemctl daemon-reload
-
-# Включить автозапуск сервиса при загрузке
-sudo systemctl enable telegram-gateway.service
-
-# Запустить сервис сейчас
-sudo systemctl start telegram-gateway.service
-```
-
-##### 3. Проверить работу сервиса
-
-```bash
-# Проверить статус сервиса
 sudo systemctl status telegram-gateway
-
-# Просмотр логов в реальном времени
+sudo systemctl restart telegram-gateway
+sudo systemctl stop telegram-gateway
 sudo journalctl -u telegram-gateway -f
-
-# Просмотр последних 100 строк логов
-sudo journalctl -u telegram-gateway -n 100
 ```
 
-##### 4. Полезные команды systemd
+### Ручная установка systemd-unit
+
+Если хотите управлять unit-файлом вручную, откройте `telegram-gateway.service` и замените все плейсхолдеры:
+
+- `__SERVICE_USER__`
+- `__PROJECT_DIR__`
+- `__ENV_FILE__`
+- `__HOME_DIR__`
+- `__SERVICE_PATH__`
+- `__PYTHON_BIN__`
+
+Строка `PATH` должна включать каталоги, где лежат и `gemini`, и `node`, особенно если они установлены через `nvm` или другой user-local способ.
+
+Затем установите unit:
 
 ```bash
-# Остановить сервис
-sudo systemctl stop telegram-gateway
-
-# Перезапустить сервис
-sudo systemctl restart telegram-gateway
-
-# Отключить автозапуск при загрузке
-sudo systemctl disable telegram-gateway
-
-# Проверить, включен ли автозапуск
-sudo systemctl is-enabled telegram-gateway
+sudo install -m 0644 telegram-gateway.service /etc/systemd/system/telegram-gateway.service
+sudo systemctl daemon-reload
+sudo systemctl enable telegram-gateway
+sudo systemctl start telegram-gateway
 ```
 
-##### 5. Обновление бота
-
-При обновлении кода:
+### Обновление деплоя
 
 ```bash
 cd /path/to/gemini_cli_gateway_tg
 git pull
-pip install -r requirements.txt  # Если изменились зависимости
+
+source .venv/bin/activate
+pip install -r requirements.txt
+
 sudo systemctl restart telegram-gateway
 ```
 
-</details>
+Повторно запускайте `./install.sh`, если сменился пользователь сервиса, переехала директория проекта, был пересоздан `venv` или Gemini CLI переустановили в другое место.
 
----
+## Docker
 
-### Docker
+Docker остаётся вторичным способом деплоя, но рекомендуемый production-путь — это `systemd`.
 
-Альтернативный метод развёртывания с использованием Docker.
+Текущая Docker-схема:
 
-#### 1. Сборка и запуск с Docker Compose
+- ставит `@google/gemini-cli` внутрь образа
+- монтирует `./workspace` в `/workspace`
+- сохраняет состояние Gemini CLI в volume `gemini_home`
+- сохраняет UI-состояние шлюза в volume `gateway_state`
+
+Запуск:
 
 ```bash
-docker compose up -d
-```
-
-#### 2. Просмотр логов
-
-```bash
+docker compose up -d --build
 docker compose logs -f gateway
 ```
 
-#### 3. Остановка контейнера
+Если используете Docker, помните, что Gemini CLI auth хранится внутри контейнерного volume, а не в пользовательском окружении хоста.
+
+## Разработка, Тесты и CI
+
+Установите dev-зависимости:
 
 ```bash
-docker compose down
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-#### 4. Обновление бота
+Локальные проверки:
 
 ```bash
-git pull
-docker compose up -d --build
-```
-
----
-
-## 🤖 Команды бота
-
-### Базовые команды
-
-- `/start` — Запустить бота и показать приветственное сообщение
-- `/new` — **Сбросить контекст** (завершает текущий процесс Gemini, начинает новый)
-- `/help` — Показать справочную информацию
-
-### Управление сессиями
-
-- `/sessions` — Просмотр и возобновление предыдущих сессий разговоров
-- `/status` — Проверить статус текущей сессии Gemini CLI
-
-### Конфигурация
-
-- `/model` — Переключить модель Gemini (gemini-3-flash-preview, gemini-3.1-pro-preview и т.д.)
-- `/settings` — Настроить режимы подтверждения, таймаут и настройки песочницы
-
-### MCP и Skills
-
-- `/mcp` — Управление MCP серверами (включить/выключить, просмотр статуса)
-- `/skills` — Управление навыками Gemini CLI (включить/выключить, просмотр статуса)
-
----
-
-## 🎯 Расширенные возможности
-
-### Управление MCP серверами
-
-MCP (Model Context Protocol) серверы расширяют Gemini CLI дополнительными возможностями.
-
-**Просмотр MCP серверов:**
-```
-/mcp
-```
-
-**Включение/выключение серверов:**
-- Нажмите inline-кнопки рядом с названием каждого сервера
-- 🟢 = Включен, 🔴 = Выключен
-
-**Использование MCP в промптах:**
-```
-/mcp exa search for latest AI news
-```
-или упомяните напрямую в любом сообщении:
-```
-@exa find information about quantum computing
-```
-
-**Обновление списка:**
-- Нажмите кнопку "🔄 Обновить список" (ограничение: раз в 3 секунды)
-
----
-
-### Управление Skills
-
-Skills — это специализированные возможности агентов для Gemini CLI.
-
-**Просмотр skills:**
-```
-/skills
-```
-
-**Включение/выключение skills:**
-- Нажмите inline-кнопки рядом с названием каждого skill
-- 🟢 = Включен, 🔴 = Выключен
-
-**Использование skills в промптах:**
-```
-/skills docx create a professional report about AI trends
-```
-
-**Доступные skills включают:**
-- `docx` — Создание и редактирование Word документов
-- `pdf` — Работа с PDF файлами
-- `humanizer` — Удаление паттернов AI-написания
-- `chrome-devtools` — Автоматизация браузера и отладка
-- И многое другое...
-
----
-
-### Режимы подтверждения
-
-Контролируйте, как Gemini CLI обрабатывает разрешения на использование инструментов.
-
-**Доступные режимы:**
-
-1. **default** — Запрашивать подтверждение для каждого вызова инструмента
-   - Бот показывает inline-кнопки: ✅ Одобрить / ❌ Отклонить / ⏭ YOLO
-   - Таймаут: 120 секунд (настраивается)
-
-2. **auto_edit** — Авто-одобрение для инструментов редактирования, запрос для остальных
-   - Сбалансированный режим для безопасной автоматизации
-
-3. **yolo** — Авто-одобрение всех действий
-   - ⚠️ Используйте с осторожностью! Подтверждение не требуется
-
-4. **plan** — Режим только для чтения
-   - CLI только планирует действия без их выполнения
-
-**Изменение режима подтверждения:**
-```
-/settings → Approval Mode → Выбрать режим
-```
-
----
-
-### Голосовые сообщения
-
-Отправляйте голосовые сообщения боту для транскрибации и обработки.
-
-**Требования:**
-- `GEMINI_API_KEY` должен быть установлен в `.env`
-
-**Как это работает:**
-1. Запишите и отправьте голосовое сообщение в Telegram
-2. Бот транскрибирует его через Gemini API
-3. Транскрибированный текст отправляется в Gemini CLI
-4. Бот отвечает с ответом
-
----
-
-## 💻 Разработка
-
-### Структура проекта
-
-```
-gemini_cli_gateway_tg/
-├── gateway/
-│   ├── main.py              # Точка входа
-│   ├── config.py            # Загрузчик конфигурации
-│   ├── bot/                 # Обработчики Telegram бота
-│   │   ├── handlers/        # Обработчики команд и сообщений
-│   │   ├── keyboards/       # Inline клавиатуры
-│   │   └── middleware/      # Аутентификация и ограничение частоты
-│   ├── gemini/              # Интеграция с Gemini CLI
-│   │   ├── session.py       # Управление процессами
-│   │   └── parser.py        # Парсер stream-json
-│   └── streaming/
-│       └── editor.py        # Стриминг сообщений
-├── tests/                   # Unit тесты
-├── .env.example             # Пример конфигурации
-├── requirements.txt         # Production зависимости
-├── requirements-dev.txt     # Development зависимости
-└── telegram-gateway.service # Systemd service файл
-```
-
-### Workflow разработки
-
-**Окружение:** Windows (локальная разработка) → Ubuntu (production)
-
-1. Внесите изменения на Windows
-2. Тестируйте локально: `python -m gateway.main`
-3. Коммит: `git add . && git commit -m "описание"`
-4. Push: `git push`
-5. На Ubuntu сервере: `git pull`
-6. Перезапуск: `sudo systemctl restart telegram-gateway`
-7. Проверка логов: `sudo journalctl -u telegram-gateway -f`
-
-### Запуск тестов
-
-```bash
-# Установить dev зависимости
-pip install -r requirements-dev.txt
-
-# Запустить тесты
-pytest tests/ -v
-
-# Запустить линтер
 ruff check .
 ruff format --check .
+pytest tests -v
 ```
 
-### Качество кода
+CI в `.github/workflows/ci.yml` запускает Ruff и pytest на push и pull request в `main`.
 
-Проект использует:
-- **Ruff** для линтинга и форматирования
-- **pytest** для тестирования
-- **GitHub Actions** для CI/CD (`.github/workflows/ci.yml`)
+## Troubleshooting
 
----
+### Сервис запускается руками, но падает под systemd
 
-## 🔍 Решение проблем
+Чаще всего это означает, что сервисный пользователь не видит `gemini`, `node` или корректное состояние аутентификации Gemini CLI.
 
-### Бот не отвечает
+Проверьте:
 
-**Проверьте, запущен ли сервис:**
 ```bash
 sudo systemctl status telegram-gateway
+sudo journalctl -u telegram-gateway -n 200 --no-pager
 ```
 
-**Просмотрите логи:**
-```bash
-sudo journalctl -u telegram-gateway -f
-```
+Затем убедитесь, что:
 
-**Частые проблемы:**
-- Отсутствует `TELEGRAM_BOT_TOKEN` в `.env`
-- Gemini CLI не установлен: `npm install -g @google/gemini-cli`
-- Версия Python < 3.12
+- `gemini` работает именно у того Unix-пользователя, от которого запущен сервис
+- `node` установлен и доступен
+- в `.env` указаны валидные директории для `GEMINI_WORKING_DIR` и `GEMINI_ARTIFACT_ROOTS`
 
----
+### `/mcp` или `/skills` пустые
 
-### `/mcp` или `/skills` показывают пустой список
+Проверьте CLI напрямую:
 
-**Проверьте установку Gemini CLI:**
 ```bash
 gemini mcp list
 gemini skills list
 ```
 
-**Установите MCP серверы:**
-```bash
-gemini mcp install exa
-gemini mcp install context7
-```
+Если списки пустые, сначала установите нужные MCP-серверы или skills в Gemini CLI.
 
-**Установите skills:**
-```bash
-gemini skills install docx
-gemini skills install pdf
-```
+### Файлы не отправляются автоматически
 
----
+Проверьте:
+
+- файл был создан внутри `GEMINI_WORKING_DIR` или одной из директорий `GEMINI_ARTIFACT_ROOTS`
+- у файла поддерживаемое расширение, либо Gemini вывел явный маркер `[SEND_FILE: ...]`
+- файл оставался неизменным не меньше `ARTIFACT_STABLE_SECONDS`
 
 ### Голосовые сообщения не работают
 
-**Убедитесь, что `GEMINI_API_KEY` установлен:**
-```bash
-# В файле .env
-GEMINI_API_KEY=your_api_key_here
-```
+Убедитесь, что в `.env` задан `GEMINI_API_KEY`.
 
-**Получить API ключ:**
-1. Перейдите на [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. Создайте новый API ключ
-3. Добавьте его в `.env`
+### Approval-кнопки не продолжают выполнение
 
----
-
-### Ошибка "TelegramBadRequest: message is not modified"
-
-Эта ошибка теперь обрабатывается автоматически. Если вы всё ещё видите её в логах:
-- Обновитесь до последней версии: `git pull`
-- Перезапустите сервис: `sudo systemctl restart telegram-gateway`
-
----
-
-### Проблемы с ограничением частоты запросов
-
-Если видите "⏳ Подожди N сек. перед следующим обновлением":
-- Это нормальное поведение для предотвращения злоупотребления API
-- Подождите 3 секунды между нажатиями кнопки обновления
-- При необходимости настройте `REFRESH_COOLDOWN_SECONDS` в `gateway/bot/handlers/callbacks.py`
-
----
-
-## 🤝 Участие в проекте
-
-Вклады приветствуются! Пожалуйста, следуйте этим шагам:
-
-1. Форкните репозиторий
-2. Создайте ветку функции: `git checkout -b feature/amazing-feature`
-3. Внесите изменения
-4. Запустите тесты: `pytest tests/ -v`
-5. Запустите линтер: `ruff check . && ruff format .`
-6. Коммит: `git commit -m "Add amazing feature"`
-7. Push: `git push origin feature/amazing-feature`
-8. Откройте Pull Request
-
----
-
-## 📄 Лицензия
-
-Этот проект является открытым исходным кодом и доступен под лицензией MIT.
-
----
-
-## 🙏 Благодарности
-
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli) от Google
-- [aiogram](https://github.com/aiogram/aiogram) — Современный фреймворк для Telegram ботов
-- Всем участникам и пользователям этого проекта
-
----
-
-## 📞 Поддержка
-
-- **Issues:** [GitHub Issues](https://github.com/Sheme1/gemini_cli_gateway_tg/issues)
-- **Обсуждения:** [GitHub Discussions](https://github.com/Sheme1/gemini_cli_gateway_tg/discussions)
-- **Telegram:** Свяжитесь с разработчиком бота
-
----
-
-**Сделано с ❤️ для сообщества Gemini CLI**
+Это известное текущее ограничение headless-пути подтверждений. Для продакшна используйте `yolo`, `auto_edit` или `plan`, пока интерактивный approval не будет реализован end-to-end.

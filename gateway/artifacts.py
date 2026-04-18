@@ -158,12 +158,13 @@ class ArtifactManager:
             logger.info("Sent artifact via BufferedInputFile: %s", path)
             return True
         except Exception as second_error:
-            logger.error("BufferedInputFile upload failed for %s: %s", path, second_error)
+            logger.error(
+                "BufferedInputFile upload failed for %s: %s", path, second_error
+            )
             await bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"⚠️ Не удалось отправить файл {path.name}.\n"
-                    f"Причина: {second_error}"
+                    f"⚠️ Не удалось отправить файл {path.name}.\nПричина: {second_error}"
                 ),
             )
             return False

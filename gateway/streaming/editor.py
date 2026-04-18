@@ -14,6 +14,7 @@ else:
 try:
     from aiogram.exceptions import TelegramBadRequest
 except Exception:  # pragma: no cover - fallback для локальных сред без aiogram
+
     class TelegramBadRequest(Exception):
         pass
 

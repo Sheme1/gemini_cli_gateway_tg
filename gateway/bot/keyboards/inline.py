@@ -82,38 +82,42 @@ def get_interactive_approval_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(2, 1)
     return builder.as_markup()
 
+
 def get_mcp_list_keyboard(servers: list[tuple[str, bool]]) -> InlineKeyboardMarkup:
     """Клавиатура со списком MCP серверов и кнопками для их Вкл/Выкл."""
     builder = InlineKeyboardBuilder()
-    
+
     for name, is_enabled in servers:
         status = "🟢" if is_enabled else "🔴"
         action = "disable" if is_enabled else "enable"
         # callback_data: "mcp_toggle:<name>:<action>"
         builder.button(
-            text=f"{status} {name}", 
-            callback_data=f"mcp_toggle:{name}:{action}"
+            text=f"{status} {name}", callback_data=f"mcp_toggle:{name}:{action}"
         )
-    
+
     builder.adjust(1)
     # Добавляем кнопку обновления
-    builder.row(InlineKeyboardButton(text="🔄 Обновить список", callback_data="mcp_refresh"))
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить список", callback_data="mcp_refresh")
+    )
     return builder.as_markup()
+
 
 def get_skills_list_keyboard(skills: list[tuple[str, bool]]) -> InlineKeyboardMarkup:
     """Клавиатура со списком Skills и кнопками для их Вкл/Выкл."""
     builder = InlineKeyboardBuilder()
-    
+
     for name, is_enabled in skills:
         status = "🟢" if is_enabled else "🔴"
         action = "disable" if is_enabled else "enable"
         # callback_data: "skill_toggle:<name>:<action>"
         builder.button(
-            text=f"{status} {name}", 
-            callback_data=f"skill_toggle:{name}:{action}"
+            text=f"{status} {name}", callback_data=f"skill_toggle:{name}:{action}"
         )
-    
+
     builder.adjust(1)
     # Добавляем кнопку обновления
-    builder.row(InlineKeyboardButton(text="🔄 Обновить список", callback_data="skill_refresh"))
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить список", callback_data="skill_refresh")
+    )
     return builder.as_markup()

@@ -1,11 +1,18 @@
 services:
   gateway:
-    build: .
+    build:
+      context: .
     container_name: gemini_gateway
+    restart: unless-stopped
     env_file:
       - .env
-    restart: always
-    volumes:
-      - ./workspace:/workspace  # Директория монтируется для Gemini CLI
     environment:
-      - GEMINI_WORKING_DIR=/workspace
+      GEMINI_WORKING_DIR: /workspace
+    volumes:
+      - ./workspace:/workspace
+      - gemini_home:/root/.gemini
+      - gateway_state:/app/.gateway_state
+
+volumes:
+  gemini_home:
+  gateway_state:

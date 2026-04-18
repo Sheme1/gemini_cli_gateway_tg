@@ -175,9 +175,7 @@ class GeminiStreamParser:
                 data.get("tool_name") or data.get("name")
             ).strip()
             tool_id = _stringify_payload(data.get("tool_id")).strip()
-            args_preview = _stringify_payload(
-                data.get("parameters", data.get("args"))
-            )
+            args_preview = _stringify_payload(data.get("parameters", data.get("args")))
             if len(args_preview) > 400:
                 args_preview = args_preview[:400].rstrip() + "..."
             return StreamEvent(

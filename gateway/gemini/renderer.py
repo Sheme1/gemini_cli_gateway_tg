@@ -25,7 +25,11 @@ def _tool_progress_name(tool_name: str) -> str:
 
 
 def render_event(event: StreamEvent, render_mode: str = DEFAULT_RENDER_MODE) -> str:
-    mode = render_mode if render_mode in {"compact", "summary", "detailed"} else DEFAULT_RENDER_MODE
+    mode = (
+        render_mode
+        if render_mode in {"compact", "summary", "detailed"}
+        else DEFAULT_RENDER_MODE
+    )
 
     if event.event_type == "assistant_text":
         return event.assistant_text
@@ -77,7 +81,9 @@ def render_event(event: StreamEvent, render_mode: str = DEFAULT_RENDER_MODE) -> 
 
     if event.event_type == "result_stats":
         if event.total_tokens or event.duration_ms:
-            return f"\n\n📊 Токены: {event.total_tokens} · {event.duration_ms / 1000:.1f}с"
+            return (
+                f"\n\n📊 Токены: {event.total_tokens} · {event.duration_ms / 1000:.1f}с"
+            )
         return ""
 
     return ""

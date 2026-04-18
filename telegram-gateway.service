@@ -1,15 +1,20 @@
+# Template for manual installation or for install.sh placeholder substitution.
+# Replace every __PLACEHOLDER__ value before copying this file to /etc/systemd/system/.
+
 [Unit]
 Description=Telegram Gateway for Gemini CLI
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
-User=gemini
-# Измените путь на актуальный для вашей системы
-WorkingDirectory=/opt/telegram-gateway
-EnvironmentFile=/opt/telegram-gateway/.env
-# Путь к python в виртуальном окружении
-ExecStart=/opt/telegram-gateway/.venv/bin/python -m gateway.main
+User=__SERVICE_USER__
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=__ENV_FILE__
+Environment=HOME=__HOME_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=__SERVICE_PATH__
+ExecStart=__PYTHON_BIN__ -m gateway.main
 Restart=always
 RestartSec=5
 StandardOutput=journal
