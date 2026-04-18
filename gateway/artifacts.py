@@ -15,12 +15,38 @@ if TYPE_CHECKING:
 
 _SKIP_DIRS = {
     ".git",
+    ".gemini",
     ".gateway_state",
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
     "__pycache__",
     "node_modules",
+}
+_FALLBACK_EXTENSIONS = {
+    ".csv",
+    ".doc",
+    ".docx",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".md",
+    ".ods",
+    ".odt",
+    ".pdf",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".svg",
+    ".tar",
+    ".tgz",
+    ".tsv",
+    ".txt",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".zip",
 }
 
 
@@ -50,11 +76,12 @@ class ArtifactManager:
     ) -> list[Path]:
         explicit_paths = self._resolve_candidates(self._explicit_candidates)
         inferred_paths = self._resolve_candidates(self._inferred_candidates)
-        fallback_paths = self._scan_recent_files(started_at)
-
-        ordered_paths = self._dedupe_paths(
-            [*explicit_paths, *inferred_paths, *fallback_paths]
-        )
+        if explicit_paths:
+            ordered_paths = explicit_paths
+        elif inferred_paths:
+            ordered_paths = inferred_paths
+        else:
+            ordered_paths = self._scan_recent_files(started_at)
         sent_paths: list[Path] = []
 
         for path in ordered_paths:
@@ -158,7 +185,11 @@ class ArtifactManager:
                         stat = path.stat()
                     except OSError:
                         continue
-                    if stat.st_mtime < threshold or not path.is_file():
+                    if (
+                        stat.st_mtime < threshold
+                        or not path.is_file()
+                        or path.suffix.lower() not in _FALLBACK_EXTENSIONS
+                    ):
                         continue
                     candidates.append((stat.st_mtime, path.resolve()))
 

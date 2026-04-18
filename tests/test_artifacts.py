@@ -62,3 +62,30 @@ def test_artifact_manager_scans_recent_files() -> None:
         assert created.resolve() in found
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_artifact_manager_fallback_scan_ignores_hidden_dirs_and_code_files() -> None:
+    tmp_path = make_test_dir()
+    try:
+        config = build_config(tmp_path)
+        manager = ArtifactManager(config)
+        started_at = time.time()
+
+        hidden_dir = tmp_path / ".gemini" / "tmp"
+        hidden_dir.mkdir(parents=True)
+        hidden_json = hidden_dir / "session.json"
+        hidden_json.write_text("{}", encoding="utf-8")
+
+        code_file = tmp_path / "create_docx.js"
+        code_file.write_text("console.log('hi')", encoding="utf-8")
+
+        document = tmp_path / "report.docx"
+        document.write_text("ok", encoding="utf-8")
+
+        found = manager._scan_recent_files(started_at=started_at - 1)
+
+        assert document.resolve() in found
+        assert hidden_json.resolve() not in found
+        assert code_file.resolve() not in found
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
