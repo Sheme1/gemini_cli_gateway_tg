@@ -242,6 +242,10 @@ class SessionManager:
         heartbeat_interval = 30  # Heartbeat каждые 30 секунд
         last_activity = asyncio.get_event_loop().time()
         heartbeat_task = None
+        tool_names_by_id: dict[str, str] = {}
+        seen_assistant_text = False
+        logged_tool_before_text = False
+        log_stream = logger.info if self.config.gemini_stream_debug else logger.debug
 
         async def send_heartbeat():
             """Периодически отправляет heartbeat если нет активности."""
@@ -319,17 +323,46 @@ class SessionManager:
                 if not line_text:
                     continue
 
-                logger.debug(f"[GEMINI RAW] {line_text}")
+                log_stream("[GEMINI RAW] %s", line_text)
 
                 event = GeminiStreamParser.parse_line(line_text)
 
                 # Логируем события для диагностики
                 if event.event_type:
-                    logger.debug(
-                        f"Event: type={event.event_type}, has_text={bool(event.assistant_text)}, "
-                        f"is_done={event.is_done}, is_empty={event.is_empty_response}, "
-                        f"is_invalid={bool(event.invalid_stream_reason)}"
+                    log_stream(
+                        "Event: type=%s tool=%s tool_id=%s delta=%s has_text=%s "
+                        "is_done=%s is_empty=%s is_invalid=%s",
+                        event.event_type,
+                        event.tool_name,
+                        event.tool_id,
+                        event.message_delta,
+                        bool(event.assistant_text),
+                        event.is_done,
+                        event.is_empty_response,
+                        bool(event.invalid_stream_reason),
                     )
+
+                if event.event_type == "tool_use" and event.tool_id and event.tool_name:
+                    tool_names_by_id[event.tool_id] = event.tool_name
+
+                if event.event_type == "tool_result" and event.tool_id:
+                    if not event.tool_name:
+                        event.tool_name = tool_names_by_id.get(event.tool_id, "")
+                    tool_names_by_id.pop(event.tool_id, None)
+
+                if event.event_type == "assistant_text" and event.assistant_text:
+                    seen_assistant_text = True
+
+                if (
+                    not seen_assistant_text
+                    and not logged_tool_before_text
+                    and event.event_type in {"tool_use", "tool_result"}
+                ):
+                    logger.info(
+                        "Gemini stream progress detected before assistant text for user %s.",
+                        user_id,
+                    )
+                    logged_tool_before_text = True
 
                 # Захват session_id из init-события
                 if event.session_id and not session_id:
@@ -362,8 +395,7 @@ class SessionManager:
                     await on_approval(event.approval_request)
                     break
 
-                if event.is_done and not event.text_chunk:
-                    # result без текста (статистика уже отправлена если была)
+                if event.is_done:
                     break
 
         finally:

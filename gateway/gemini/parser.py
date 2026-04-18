@@ -48,7 +48,10 @@ _LIKELY_ARTIFACT_EXTENSIONS = {
 class StreamEvent:
     event_type: str = ""
     assistant_text: str = ""
+    message_delta: bool = False
+    tool_id: str = ""
     tool_name: str = ""
+    tool_status: str = ""
     tool_args_preview: str = ""
     tool_output_preview: str = ""
     approval_request: Optional[dict[str, Any]] = None
@@ -78,6 +81,13 @@ def _stringify_payload(value: Any) -> str:
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, ensure_ascii=False)
     return str(value)
+
+
+def _preview(text: str, limit: int = 280) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip() + "..."
 
 
 def _normalize_path_candidate(raw_value: str) -> str:
@@ -124,6 +134,10 @@ class GeminiStreamParser:
             logger.debug("[RAW NON-JSON] %r", clean_line)
             return StreamEvent()
 
+        if not isinstance(data, dict):
+            logger.debug("[RAW JSON NON-OBJECT] %r", _preview(_stringify_payload(data)))
+            return StreamEvent()
+
         raw_type = data.get("type", "")
 
         if raw_type == "init":
@@ -137,7 +151,7 @@ class GeminiStreamParser:
 
         if raw_type == "message":
             role = data.get("role", "")
-            content = _stringify_payload(data.get("content"))
+            content = _stringify_payload(data.get("content")).strip()
             if role != "assistant" or not content:
                 return StreamEvent()
 
@@ -151,30 +165,56 @@ class GeminiStreamParser:
             return StreamEvent(
                 event_type="assistant_text",
                 assistant_text=content,
+                message_delta=bool(data.get("delta")),
                 file_candidates=_dedupe([*direct_candidates, *inferred_candidates]),
                 direct_file_candidates=_dedupe(direct_candidates),
             )
 
         if raw_type == "tool_use":
-            tool_name = _stringify_payload(data.get("name")).strip()
-            args_preview = _stringify_payload(data.get("args"))
+            tool_name = _stringify_payload(
+                data.get("tool_name") or data.get("name")
+            ).strip()
+            tool_id = _stringify_payload(data.get("tool_id")).strip()
+            args_preview = _stringify_payload(
+                data.get("parameters", data.get("args"))
+            )
             if len(args_preview) > 400:
                 args_preview = args_preview[:400].rstrip() + "..."
             return StreamEvent(
                 event_type="tool_use",
+                tool_id=tool_id,
                 tool_name=tool_name,
                 tool_args_preview=args_preview,
                 file_candidates=_extract_file_candidates(args_preview),
             )
 
         if raw_type == "tool_result":
-            output_preview = _stringify_payload(data.get("output"))
+            tool_id = _stringify_payload(data.get("tool_id")).strip()
+            tool_name = _stringify_payload(
+                data.get("tool_name") or data.get("name")
+            ).strip()
+            tool_status = _stringify_payload(data.get("status")).strip().lower()
+
+            output_value = data.get("output")
+            error_value = data.get("error")
+            output_preview = _stringify_payload(output_value)
+            error_preview = _stringify_payload(error_value)
+            if not output_preview and error_preview:
+                output_preview = error_preview
             if len(output_preview) > 700:
                 output_preview = output_preview[:700].rstrip() + "..."
             return StreamEvent(
                 event_type="tool_result",
+                tool_id=tool_id,
+                tool_name=tool_name,
+                tool_status=tool_status,
                 tool_output_preview=output_preview,
-                file_candidates=_extract_file_candidates(output_preview),
+                file_candidates=_dedupe(
+                    [
+                        *_extract_file_candidates(_stringify_payload(output_value)),
+                        *_extract_file_candidates(_stringify_payload(error_value)),
+                    ]
+                ),
             )
 
         if raw_type in {"approval_request", "confirmation_request"}:
@@ -225,5 +265,9 @@ class GeminiStreamParser:
                 invalid_stream_reason=reason,
             )
 
-        logger.debug("[UNKNOWN EVENT] type=%s, data=%s", raw_type, data)
+        logger.debug(
+            "[UNKNOWN EVENT] type=%s payload=%s",
+            raw_type or "<empty>",
+            _preview(_stringify_payload(data), limit=400),
+        )
         return StreamEvent()

@@ -9,7 +9,10 @@ def test_render_event_hides_tool_details_in_compact_mode() -> None:
         tool_args_preview='{"path":"draft.md"}',
     )
 
-    assert render_event(event, "compact") == ""
+    rendered = render_event(event, "compact")
+
+    assert "Выполняю" in rendered
+    assert "write_file" in rendered
 
 
 def test_render_event_shows_summary_for_tool_use() -> None:
@@ -37,3 +40,16 @@ def test_render_event_drops_unknown_tool_name() -> None:
 
     assert "unknown" not in rendered
     assert "внутренний шаг" in rendered
+
+
+def test_render_event_shows_compact_tool_result_progress() -> None:
+    event = StreamEvent(
+        event_type="tool_result",
+        tool_name="write_file",
+        tool_status="success",
+    )
+
+    rendered = render_event(event, "compact")
+
+    assert "Готово" in rendered
+    assert "write_file" in rendered

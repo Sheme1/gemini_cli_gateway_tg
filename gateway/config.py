@@ -27,6 +27,7 @@ class Config:
     gemini_artifact_roots: tuple[str, ...] = field(default_factory=tuple)
     gemini_cli_timeout: int = 300  # секунды
     gemini_sandbox: bool = False
+    gemini_stream_debug: bool = False
 
     # === Gemini API (для голосовых) ===
     gemini_api_key: Optional[str] = None
@@ -63,6 +64,10 @@ class Config:
         # Парсинг GEMINI_SANDBOX
         sandbox_raw = os.getenv("GEMINI_SANDBOX", "false").strip().lower()
         sandbox = sandbox_raw in ("true", "1", "yes")
+
+        # Парсинг GEMINI_STREAM_DEBUG
+        stream_debug_raw = os.getenv("GEMINI_STREAM_DEBUG", "false").strip().lower()
+        stream_debug = stream_debug_raw in ("true", "1", "yes")
 
         # Парсинг GEMINI_WORKING_DIR
         working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
@@ -107,6 +112,7 @@ class Config:
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
             ),
             gemini_sandbox=sandbox,
+            gemini_stream_debug=stream_debug,
             gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
             stream_update_interval=float(
                 os.getenv(

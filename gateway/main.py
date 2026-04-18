@@ -29,6 +29,14 @@ async def main() -> None:
         logger.error(f"Ошибка загрузки конфигурации: {e}")
         sys.exit(1)
 
+    configured_level = getattr(logging, config.log_level, logging.INFO)
+    if config.gemini_stream_debug and configured_level > logging.INFO:
+        configured_level = logging.INFO
+    logging.getLogger().setLevel(configured_level)
+
+    if config.gemini_stream_debug:
+        logger.info("Gemini stream diagnostics enabled.")
+
     # Инициализация бота
     bot = Bot(
         token=config.telegram_bot_token,

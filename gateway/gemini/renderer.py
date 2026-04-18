@@ -20,6 +20,10 @@ def _tool_name(tool_name: str) -> str:
     return normalized
 
 
+def _tool_progress_name(tool_name: str) -> str:
+    return _tool_name(tool_name) or "внутренний шаг"
+
+
 def render_event(event: StreamEvent, render_mode: str = DEFAULT_RENDER_MODE) -> str:
     mode = render_mode if render_mode in {"compact", "summary", "detailed"} else DEFAULT_RENDER_MODE
 
@@ -39,9 +43,9 @@ def render_event(event: StreamEvent, render_mode: str = DEFAULT_RENDER_MODE) -> 
         return f"\n\n⚠️ Проблема со стримом: {event.invalid_stream_reason}"
 
     if event.event_type == "tool_use":
+        tool_name = _tool_progress_name(event.tool_name)
         if mode == "compact":
-            return ""
-        tool_name = _tool_name(event.tool_name) or "внутренний шаг"
+            return f"\n🛠 Выполняю: {tool_name}"
         if mode == "summary":
             return f"\n\n🛠 Инструмент: {tool_name}"
         if not event.tool_args_preview:
@@ -52,15 +56,24 @@ def render_event(event: StreamEvent, render_mode: str = DEFAULT_RENDER_MODE) -> 
         )
 
     if event.event_type == "tool_result":
+        tool_name = _tool_progress_name(event.tool_name)
+        is_error = event.tool_status == "error"
         if mode == "compact":
-            return ""
+            prefix = "⚠️ Ошибка инструмента" if is_error else "📋 Готово"
+            return f"\n{prefix}: {tool_name}"
         if mode == "summary":
-            if not event.tool_output_preview:
-                return ""
-            return "\n📋 Результат инструмента получен."
+            if is_error:
+                return f"\n⚠️ Ошибка инструмента: {tool_name}"
+            return f"\n📋 Результат: {tool_name}"
+        if is_error and not event.tool_output_preview:
+            return f"\n⚠️ Ошибка инструмента: {tool_name}"
         if not event.tool_output_preview:
-            return ""
-        return f"\n📋 Результат: {_preview(event.tool_output_preview, limit=500)}"
+            return f"\n📋 Результат: {tool_name}"
+        prefix = "⚠️ Ошибка" if is_error else "📋 Результат"
+        return (
+            f"\n{prefix}: {tool_name}\n"
+            f"Детали: {_preview(event.tool_output_preview, limit=500)}"
+        )
 
     if event.event_type == "result_stats":
         if event.total_tokens or event.duration_ms:
