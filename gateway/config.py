@@ -28,6 +28,9 @@ class Config:
     gemini_cli_timeout: int = 300  # секунды
     gemini_sandbox: bool = False
     gemini_stream_debug: bool = False
+    gemini_soft_finalize_idle_seconds: int = 90
+    artifact_watch_interval: float = 1.0
+    artifact_stable_seconds: float = 5.0
 
     # === Gemini API (для голосовых) ===
     gemini_api_key: Optional[str] = None
@@ -113,6 +116,24 @@ class Config:
             ),
             gemini_sandbox=sandbox,
             gemini_stream_debug=stream_debug,
+            gemini_soft_finalize_idle_seconds=int(
+                os.getenv(
+                    "GEMINI_SOFT_FINALIZE_IDLE_SECONDS",
+                    str(cls.gemini_soft_finalize_idle_seconds),
+                )
+            ),
+            artifact_watch_interval=float(
+                os.getenv(
+                    "ARTIFACT_WATCH_INTERVAL",
+                    str(cls.artifact_watch_interval),
+                )
+            ),
+            artifact_stable_seconds=float(
+                os.getenv(
+                    "ARTIFACT_STABLE_SECONDS",
+                    str(cls.artifact_stable_seconds),
+                )
+            ),
             gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
             stream_update_interval=float(
                 os.getenv(

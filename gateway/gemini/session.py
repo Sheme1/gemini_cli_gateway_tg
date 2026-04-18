@@ -22,6 +22,7 @@ class SessionManager:
         self.config = config
         # user_id -> gemini_session_id
         self.active_sessions: dict[int, str] = {}
+        self.active_prompt_processes: dict[int, asyncio.subprocess.Process] = {}
 
     async def get_sessions_list(self) -> list[tuple[str, str]]:
         """Возвращает актуальный список сессий: список кортежей (id, описание)."""
@@ -192,7 +193,8 @@ class SessionManager:
         return True
 
     async def kill(self) -> None:
-        pass
+        for user_id in list(self.active_prompt_processes):
+            await self.cancel_active_prompt(user_id, reason="gateway shutdown")
 
     async def reset(self, user_id: int) -> None:
         """Сброс контекста (/new): очистка привязанного session_id."""
@@ -203,6 +205,21 @@ class SessionManager:
     async def set_active_session(self, user_id: int, session_id: str) -> None:
         self.active_sessions[user_id] = session_id
         logger.info(f"Set active session {session_id} for user {user_id}")
+
+    async def cancel_active_prompt(self, user_id: int, reason: str = "") -> bool:
+        process = self.active_prompt_processes.get(user_id)
+        if not process or process.returncode is not None:
+            return False
+        logger.info(
+            "Cancelling active Gemini prompt for user %s%s",
+            user_id,
+            f" ({reason})" if reason else "",
+        )
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return False
+        return True
 
     async def send_prompt(
         self,
@@ -237,6 +254,7 @@ class SessionManager:
             stderr=asyncio.subprocess.DEVNULL,  # Отбрасываем stderr — избегаем deadlock
             cwd=self.config.gemini_working_dir,
         )
+        self.active_prompt_processes[user_id] = process
 
         timeout = self.config.gemini_cli_timeout
         heartbeat_interval = 30  # Heartbeat каждые 30 секунд
@@ -414,6 +432,8 @@ class SessionManager:
                 except ProcessLookupError:
                     pass
             await process.wait()
+            if self.active_prompt_processes.get(user_id) is process:
+                self.active_prompt_processes.pop(user_id, None)
 
             logger.info(
                 f"Prompt processing completed for user {user_id}, "

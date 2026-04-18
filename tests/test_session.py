@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -19,12 +20,14 @@ class _FakeStdout:
 class _FakeProcess:
     def __init__(self, lines: list[str]):
         self.stdout = _FakeStdout(lines)
-        self.returncode = 0
+        self.returncode = None
 
     def kill(self) -> None:
         self.returncode = -9
 
     async def wait(self) -> int:
+        if self.returncode is None:
+            self.returncode = 0
         return self.returncode
 
 
@@ -98,3 +101,47 @@ async def test_session_manager_maps_tool_result_to_tool_name(monkeypatch) -> Non
         "result_stats",
     ]
     assert events[1].tool_name == "write_file"
+
+
+@pytest.mark.asyncio
+async def test_session_manager_can_cancel_active_prompt(monkeypatch) -> None:
+    process_holder = {}
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        process = _FakeProcess([])
+        process_holder["process"] = process
+        return process
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+    )
+    manager = SessionManager(config)
+
+    async def on_event(_event):
+        return None
+
+    async def on_approval(_req):
+        return None
+
+    task = asyncio.create_task(
+        manager.send_prompt(
+            prompt="test",
+            user_id=321,
+            on_event=on_event,
+            on_approval=on_approval,
+        )
+    )
+    await asyncio.sleep(0)
+
+    cancelled = await manager.cancel_active_prompt(321, reason="test")
+    await task
+
+    assert cancelled is True
+    assert process_holder["process"].returncode == -9
