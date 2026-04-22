@@ -4,18 +4,92 @@ import os
 import re
 import signal
 import subprocess
+import time
+from dataclasses import dataclass
 from typing import Callable
 
 from gateway.config import Config
 from gateway.gemini.parser import GeminiStreamParser, StreamEvent
+from gateway.runtime import GatewayRuntimeState, PromptLatencySnapshot
 
 logger = logging.getLogger(__name__)
+_SESSION_LINE_RE = re.compile(
+    r"^\s*(?P<index>\d+)\.\s*(?P<title>.*?)\s*"
+    r"\((?P<meta>[^()]*)\)\s*\[(?P<session_id>[A-Za-z0-9-]+)\]\s*$"
+)
+
+
+@dataclass(frozen=True)
+class GeminiSessionInfo:
+    session_id: str
+    title: str
+    relative_time: str
+    is_current: bool
+    source_index: int
+    sort_index: int
+
+    @property
+    def short_id(self) -> str:
+        if len(self.session_id) <= 12:
+            return self.session_id
+        return f"{self.session_id[:8]}..."
 
 
 def strip_ansi_codes(text: str) -> str:
     """Удаляет ANSI escape коды из текста."""
     ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
     return ansi_escape.sub("", text)
+
+
+def parse_gemini_sessions_output(output: str) -> list[GeminiSessionInfo]:
+    """Разобрать человекочитаемый вывод `gemini --list-sessions`."""
+    sessions: list[GeminiSessionInfo] = []
+    for raw_line in strip_ansi_codes(output).splitlines():
+        line = raw_line.strip()
+        if not line or _is_session_list_noise(line):
+            continue
+
+        match = _SESSION_LINE_RE.match(line)
+        if not match:
+            logger.debug("Skipping unrecognized Gemini session line: %s", line)
+            continue
+
+        source_index = int(match.group("index"))
+        meta_parts = [
+            part.strip() for part in match.group("meta").split(",") if part.strip()
+        ]
+        is_current = any(part.lower() == "current" for part in meta_parts)
+        relative_time = ", ".join(
+            part for part in meta_parts if part.lower() != "current"
+        )
+        title = match.group("title").strip().strip(":") or "Без описания"
+
+        sessions.append(
+            GeminiSessionInfo(
+                session_id=match.group("session_id").strip(),
+                title=title,
+                relative_time=relative_time or "unknown",
+                is_current=is_current,
+                source_index=source_index,
+                sort_index=source_index,
+            )
+        )
+
+    return sorted(sessions, key=lambda item: item.sort_index, reverse=True)
+
+
+def _is_session_list_noise(line: str) -> bool:
+    lower = line.lower()
+    return (
+        "no previous sessions" in lower
+        or "available sessions" in lower
+        or "keychain" in lower
+        or "loaded" in lower
+        or "using" in lower
+        or lower.startswith("[warn]")
+        or lower.startswith("warn")
+        or lower.startswith("error:")
+    )
 
 
 class BoundedTextBuffer:
@@ -53,11 +127,20 @@ def _build_empty_stream_warning(stderr_text: str) -> str:
     )
 
 
+def _elapsed_ms(start: float, end: float) -> int:
+    return max(0, int((end - start) * 1000))
+
+
 class SessionManager:
     """Управляет сессиями Gemini CLI."""
 
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        runtime_state: GatewayRuntimeState | None = None,
+    ):
         self.config = config
+        self.runtime_state = runtime_state
         # user_id -> gemini_session_id
         self.active_sessions: dict[int, str] = {}
         self.active_prompt_processes: dict[int, asyncio.subprocess.Process] = {}
@@ -82,48 +165,27 @@ class SessionManager:
             if process.returncode is None
         ]
 
-    async def get_sessions_list(self) -> list[tuple[str, str]]:
-        """Возвращает актуальный список сессий: список кортежей (id, описание)."""
+    async def get_sessions_list(self) -> list[GeminiSessionInfo]:
+        """Вернуть список сессий Gemini CLI, отсортированный от новых к старым."""
         process = await asyncio.create_subprocess_exec(
             self.config.gemini_bin,
             "--list-sessions",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             cwd=self.config.gemini_working_dir,
         )
-        stdout, _ = await process.communicate()
-        lines = stdout.decode("utf-8").splitlines()
-
-        sessions = []
-        for line in lines:
-            line = line.strip()
-            # Пропускаем заголовки, логи и пустые строки
-            if (
-                not line
-                or "No previous" in line
-                or "Available sessions" in line
-                or "Keychain" in line
-                or "Loaded" in line
-                or "Using" in line
-                or "error:" in line.lower()
-            ):
-                continue
-
-            # Формат: "8. Узнать погоду. (Just now) [ed4342c5-efa4-48ff-8846-6ee37b8efb64]"
-            match = re.search(
-                r"^\s*\d+\.\s*(.*?)\s*\((.*?)\)\s*\[([a-fA-F0-9\-]+)\]", line
+        stdout, stderr = await process.communicate()
+        output = (
+            stdout.decode("utf-8", errors="replace")
+            + "\n"
+            + stderr.decode("utf-8", errors="replace")
+        )
+        if process.returncode != 0:
+            raise RuntimeError(
+                "gemini --list-sessions failed with code "
+                f"{process.returncode}: {strip_ansi_codes(output).strip()[:1000]}"
             )
-            if match:
-                desc_raw = match.group(1).strip().strip(":")
-                time_ago = match.group(2).strip()
-                session_id = match.group(3).strip()
-
-                desc = desc_raw if desc_raw else "Без описания"
-                desc = f"{desc} ({time_ago})"
-                desc = desc[:60] + "..." if len(desc) > 60 else desc
-
-                sessions.append((session_id, desc))
-        return sessions
+        return parse_gemini_sessions_output(output)
 
     async def get_mcp_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список MCP серверов: (имя, включен_ли)."""
@@ -360,6 +422,7 @@ class SessionManager:
         ]
         args.extend(self.config.approval_mode_flag)
         args.extend(self.config.sandbox_flag)
+        args.extend(self.config.include_directories_flag)
 
         session_id = self.active_sessions.get(user_id)
         if session_id:
@@ -382,15 +445,21 @@ class SessionManager:
         else:
             process_kwargs["start_new_session"] = True
 
+        loop = asyncio.get_running_loop()
+        prompt_started_at = time.time()
+        prompt_start = loop.time()
         process = await asyncio.create_subprocess_exec(
             *args,
             **process_kwargs,
         )
+        process_spawn_ms = _elapsed_ms(prompt_start, loop.time())
         self.active_prompt_processes[user_id] = process
 
         timeout = self.config.gemini_cli_timeout
         heartbeat_interval = 30  # Heartbeat каждые 30 секунд
-        last_activity = asyncio.get_event_loop().time()
+        last_activity = loop.time()
+        init_ms: int | None = None
+        first_text_ms: int | None = None
         heartbeat_task = None
         stderr_task = None
         stderr_buffer = BoundedTextBuffer()
@@ -511,6 +580,9 @@ class SessionManager:
                         bool(event.invalid_stream_reason),
                     )
 
+                if event.event_type == "init" and init_ms is None:
+                    init_ms = _elapsed_ms(prompt_start, loop.time())
+
                 if event.event_type == "assistant_text":
                     original_text = event.assistant_text
                     if not event.message_delta:
@@ -533,6 +605,8 @@ class SessionManager:
                     tool_names_by_id.pop(event.tool_id, None)
 
                 if event.event_type == "assistant_text" and event.assistant_text:
+                    if first_text_ms is None:
+                        first_text_ms = _elapsed_ms(prompt_start, loop.time())
                     seen_assistant_text = True
 
                 if (
@@ -655,9 +729,29 @@ class SessionManager:
             if self.active_prompt_processes.get(user_id) is process:
                 self.active_prompt_processes.pop(user_id, None)
 
+            total_ms = _elapsed_ms(prompt_start, loop.time())
+            if self.runtime_state is not None:
+                self.runtime_state.record_prompt_latency(
+                    PromptLatencySnapshot(
+                        user_id=user_id,
+                        started_at=prompt_started_at,
+                        process_spawn_ms=process_spawn_ms,
+                        init_ms=init_ms,
+                        first_text_ms=first_text_ms,
+                        total_ms=total_ms,
+                        returncode=process.returncode,
+                    )
+                )
+
             logger.info(
-                f"Prompt processing completed for user {user_id}, "
-                f"returncode={process.returncode}"
+                "Prompt processing completed for user %s, returncode=%s, "
+                "spawn=%sms init=%s first_text=%s total=%sms",
+                user_id,
+                process.returncode,
+                process_spawn_ms,
+                init_ms,
+                first_text_ms,
+                total_ms,
             )
 
     async def answer_approval(self, answer: str) -> None:

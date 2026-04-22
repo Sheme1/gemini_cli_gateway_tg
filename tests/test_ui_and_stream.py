@@ -106,6 +106,35 @@ async def test_stream_editor_does_not_keep_status_in_final_answer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_editor_edits_first_answer_chunk_immediately() -> None:
+    bot = _FakeBot()
+    editor = StreamEditor(bot=bot, chat_id=1, interval=60, min_update_chars=100)
+
+    await editor.initialize("loading")
+    await editor.append_text("Первый чанк")
+
+    assert bot.edits[-1]["text"] == "Первый чанк"
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_coalesces_later_small_chunks() -> None:
+    bot = _FakeBot()
+    editor = StreamEditor(bot=bot, chat_id=1, interval=60, min_update_chars=100)
+
+    await editor.initialize("loading")
+    await editor.append_text("Первый")
+    edit_count = len(bot.edits)
+    await editor.append_text(" маленький")
+    await asyncio.sleep(0)
+
+    assert len(bot.edits) == edit_count
+
+    await editor.flush()
+
+    assert bot.edits[-1]["text"] == "Первый маленький"
+
+
+@pytest.mark.asyncio
 async def test_stream_editor_falls_back_to_new_message_when_edit_is_gone() -> None:
     bot = _FakeBot(
         failures=[

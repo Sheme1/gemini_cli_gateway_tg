@@ -6,6 +6,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 
 from gateway.bot.keyboards import inline
+from gateway.bot.sessions import build_sessions_page
 from gateway.bot.ui import (
     APPROVAL_MODE_DESCRIPTIONS,
     APPROVAL_MODE_LABELS,
@@ -55,12 +56,12 @@ async def callback_model(
 # ======================== Sessions ========================
 
 
-@router.callback_query(F.data.startswith("resume_"))
+@router.callback_query(F.data.startswith("session:open:"))
 async def callback_resume_session(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
     """Выбор старой сессии из списка /sessions."""
-    session_id = callback.data.split("resume_")[1]
+    session_id = callback.data.split(":", maxsplit=2)[2]
 
     await session_manager.set_active_session(callback.from_user.id, session_id)
 
@@ -70,6 +71,68 @@ async def callback_resume_session(
         reply_markup=None,
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("session:page:"))
+async def callback_sessions_page(
+    callback: CallbackQuery,
+    session_manager: SessionManager,
+) -> None:
+    page = _parse_session_page(callback.data, prefix="session:page:")
+    await _edit_sessions_page(callback, session_manager, page)
+
+
+@router.callback_query(F.data.startswith("session:refresh:"))
+async def callback_sessions_refresh(
+    callback: CallbackQuery,
+    session_manager: SessionManager,
+) -> None:
+    page = _parse_session_page(callback.data, prefix="session:refresh:")
+    await _edit_sessions_page(callback, session_manager, page, refreshed=True)
+
+
+@router.callback_query(F.data.startswith("resume_"))
+async def callback_resume_session_legacy(
+    callback: CallbackQuery, session_manager: SessionManager
+) -> None:
+    """Поддержка старых inline-кнопок, отправленных до обновления."""
+    session_id = callback.data.split("resume_", maxsplit=1)[1]
+    await session_manager.set_active_session(callback.from_user.id, session_id)
+    await callback.message.edit_text(
+        f"✅ <b>Диалог выбран:</b> <code>{session_id}</code>\n"
+        "Все последующие запросы будут отправлены в этот контекст.",
+        reply_markup=None,
+    )
+    await callback.answer()
+
+
+async def _edit_sessions_page(
+    callback: CallbackQuery,
+    session_manager: SessionManager,
+    page: int,
+    *,
+    refreshed: bool = False,
+) -> None:
+    sessions = await session_manager.get_sessions_list()
+    if not sessions:
+        await callback.message.edit_text("📂 Сохранённые диалоги не найдены.")
+        await callback.answer("Список пуст")
+        return
+
+    text, reply_markup = build_sessions_page(sessions, page=page)
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await callback.answer("🔄 Список обновлён" if refreshed else None)
+
+
+def _parse_session_page(data: str, prefix: str) -> int:
+    try:
+        return max(0, int(data.removeprefix(prefix)))
+    except ValueError:
+        return 0
 
 
 # ======================== Approval ========================

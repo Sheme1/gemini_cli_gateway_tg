@@ -59,6 +59,7 @@ class StreamEditor:
         self.last_update_task: Optional[asyncio.Task] = None
         self.is_flushing = False
         self._first_chunk = True
+        self._has_answer_text = False
         self._loading_task: Optional[asyncio.Task] = None
 
     async def _loading_animation(self, chat_id: int, message_id: int) -> None:
@@ -111,6 +112,7 @@ class StreamEditor:
         self.text_buffer = ""
         self.status_line = ""
         self._first_chunk = True
+        self._has_answer_text = False
         self._loading_task = asyncio.create_task(
             self._loading_animation(self.chat_id, self.current_message_id)
         )
@@ -122,32 +124,32 @@ class StreamEditor:
         self.text_buffer = ""
         self.status_line = ""
         self._first_chunk = False
+        self._has_answer_text = False
 
     async def append_text(self, text_chunk: str) -> None:
         if not text_chunk:
             return
 
-        if self._first_chunk:
-            self._first_chunk = False
-            self.last_sent_text = ""
-            if self._loading_task and not self._loading_task.done():
-                self._loading_task.cancel()
+        is_first_answer_chunk = not self._has_answer_text
+        if is_first_answer_chunk:
+            self._has_answer_text = True
+            self._clear_initial_state()
+            if self.last_update_task and not self.last_update_task.done():
+                self.last_update_task.cancel()
 
         self.text_buffer += text_chunk
 
         if len(self.last_sent_text) + len(self.text_buffer) >= self.max_length:
             await self._flush_and_split()
+        elif is_first_answer_chunk:
+            await self._update_buffered()
         elif (self.last_update_task is None or self.last_update_task.done()) and (
             not self.last_sent_text or len(self.text_buffer) >= self.min_update_chars
         ):
             self.last_update_task = asyncio.create_task(self._throttled_update())
 
     async def set_status(self, status: str) -> None:
-        if self._first_chunk:
-            self._first_chunk = False
-            self.last_sent_text = ""
-            if self._loading_task and not self._loading_task.done():
-                self._loading_task.cancel()
+        self._clear_initial_state()
 
         self.status_line = status
         if self.last_update_task is None or self.last_update_task.done():
@@ -187,6 +189,9 @@ class StreamEditor:
 
     async def _throttled_update(self) -> None:
         await asyncio.sleep(self.interval)
+        await self._update_buffered()
+
+    async def _update_buffered(self) -> None:
         if (not self.text_buffer and not self.status_line) or self.is_flushing:
             return
 
@@ -199,6 +204,14 @@ class StreamEditor:
         if success:
             self.last_sent_text = full_text
             self.text_buffer = ""
+
+    def _clear_initial_state(self) -> None:
+        if not self._first_chunk:
+            return
+        self._first_chunk = False
+        self.last_sent_text = ""
+        if self._loading_task and not self._loading_task.done():
+            self._loading_task.cancel()
 
     async def _raw_edit(self, text: str) -> bool:
         if not self.current_message_id:

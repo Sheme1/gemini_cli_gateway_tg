@@ -25,6 +25,7 @@ class Config:
     gemini_bin: str = "gemini"
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
+    gemini_include_directories: tuple[str, ...] = field(default_factory=tuple)
     gemini_artifact_roots: tuple[str, ...] = field(default_factory=tuple)
     gemini_cli_timeout: int = 600  # секунды
     gemini_shutdown_grace_seconds: float = 5.0
@@ -96,6 +97,11 @@ class Config:
                 "или не является папкой. Проверьте настройки в .env файле."
             )
 
+        include_directories = _parse_existing_directories(
+            os.getenv("GEMINI_INCLUDE_DIRECTORIES", ""),
+            "GEMINI_INCLUDE_DIRECTORIES",
+        )
+
         artifact_roots_raw = os.getenv("GEMINI_ARTIFACT_ROOTS", "").strip()
         artifact_roots: list[str] = []
         if artifact_roots_raw:
@@ -125,6 +131,7 @@ class Config:
                 "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
             ),
             gemini_working_dir=str(working_dir),
+            gemini_include_directories=tuple(dict.fromkeys(include_directories)),
             gemini_artifact_roots=tuple(dict.fromkeys(artifact_roots)),
             gemini_cli_timeout=int(
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
@@ -197,16 +204,24 @@ class Config:
             "gemini_bin": self.gemini_bin,
             "gemini_approval_mode": self.gemini_approval_mode,
             "gemini_working_dir": self.gemini_working_dir,
+            "gemini_include_directories": self.gemini_include_directories,
             "gemini_artifact_roots": self.gemini_artifact_roots,
             "gemini_cli_timeout": self.gemini_cli_timeout,
             "gemini_shutdown_grace_seconds": self.gemini_shutdown_grace_seconds,
             "gemini_sandbox": self.gemini_sandbox,
             "gemini_stream_debug": self.gemini_stream_debug,
+            "gemini_soft_finalize_idle_seconds": (
+                self.gemini_soft_finalize_idle_seconds
+            ),
+            "artifact_watch_interval": self.artifact_watch_interval,
+            "artifact_stable_seconds": self.artifact_stable_seconds,
             "stream_update_interval": self.stream_update_interval,
             "stream_min_update_chars": self.stream_min_update_chars,
+            "stream_retry_max_delay": self.stream_retry_max_delay,
             "polling_timeout": self.polling_timeout,
             "polling_concurrency_limit": self.polling_concurrency_limit,
             "gateway_state_dir": self.gateway_state_dir,
+            "approval_timeout": self.approval_timeout,
             "log_level": self.log_level,
             "gemini_api_key": _mask_secret(self.gemini_api_key),
         }
@@ -226,6 +241,13 @@ class Config:
         """Аргумент --sandbox, если включён."""
         return ["--sandbox"] if self.gemini_sandbox else []
 
+    @property
+    def include_directories_flag(self) -> list[str]:
+        """Аргументы для дополнительных директорий Gemini workspace."""
+        if not self.gemini_include_directories:
+            return []
+        return ["--include-directories", ",".join(self.gemini_include_directories)]
+
 
 def _mask_secret(value: str | None) -> str | None:
     if not value:
@@ -233,3 +255,19 @@ def _mask_secret(value: str | None) -> str | None:
     if len(value) <= 8:
         return "***"
     return f"{value[:4]}...{value[-4:]}"
+
+
+def _parse_existing_directories(raw_value: str, env_name: str) -> list[str]:
+    directories: list[str] = []
+    for raw_path in raw_value.strip().split(","):
+        path = raw_path.strip()
+        if not path:
+            continue
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            raise ValueError(
+                f"Директория {env_name}='{resolved}' не существует "
+                "или не является папкой. Проверьте настройки в .env файле."
+            )
+        directories.append(str(resolved))
+    return directories

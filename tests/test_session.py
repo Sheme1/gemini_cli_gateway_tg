@@ -4,7 +4,10 @@ import json
 import pytest
 
 from gateway.config import Config
-from gateway.gemini.session import SessionManager
+from gateway.gemini.session import (
+    SessionManager,
+    parse_gemini_sessions_output,
+)
 
 
 class _FakeStream:
@@ -47,6 +50,35 @@ class _FakeProcess:
             self.returncode = self._returncode_on_wait
             self._finished.set()
         return self.returncode
+
+
+def test_parse_gemini_sessions_output_newest_first_and_current() -> None:
+    output = """
+Available sessions for this project (3):
+
+  1. Old auth fix (2 days ago) [11111111-1111-4111-8111-111111111111]
+  2. Middle topic with (notes) (5 hours ago) [22222222]
+  3. Latest deploy check (Just now, current) [33333333-3333-4333-8333-333333333333]
+[WARN] Skipping unreadable directory: tmp
+"""
+
+    sessions = parse_gemini_sessions_output(output)
+
+    assert [session.title for session in sessions] == [
+        "Latest deploy check",
+        "Middle topic with (notes)",
+        "Old auth fix",
+    ]
+    assert sessions[0].is_current is True
+    assert sessions[0].relative_time == "Just now"
+    assert sessions[0].short_id == "33333333..."
+    assert sessions[1].session_id == "22222222"
+
+
+def test_parse_gemini_sessions_output_ignores_empty_and_warning_output() -> None:
+    output = "No previous sessions found for this project.\n[WARN] skipped"
+
+    assert parse_gemini_sessions_output(output) == []
 
 
 @pytest.mark.asyncio
@@ -247,3 +279,53 @@ async def test_session_manager_deduplicates_full_message_snapshots(monkeypatch) 
     )
 
     assert chunks == ["Привет", " мир"]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_passes_include_directories(monkeypatch) -> None:
+    captured_args = []
+
+    lines = [
+        json.dumps(
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {"total_tokens": 1, "duration_ms": 10},
+            }
+        ),
+    ]
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        captured_args.extend(args)
+        return _FakeProcess(lines)
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+        gemini_include_directories=("/repo/shared", "/repo/docs"),
+    )
+    manager = SessionManager(config)
+
+    async def on_event(_event):
+        return None
+
+    async def on_approval(_req):
+        raise AssertionError("approval request was not expected")
+
+    await manager.send_prompt(
+        prompt="test",
+        user_id=123,
+        on_event=on_event,
+        on_approval=on_approval,
+    )
+
+    assert "--include-directories" in captured_args
+    assert captured_args[captured_args.index("--include-directories") + 1] == (
+        "/repo/shared,/repo/docs"
+    )

@@ -54,7 +54,7 @@ async def main(check_runtime: bool = False) -> None:
     )
 
     # Инициализация SessionManager
-    session_manager = SessionManager(config=config)
+    session_manager = SessionManager(config=config, runtime_state=runtime_state)
     user_settings = UserSettingsStore(state_dir=Path(config.gateway_state_dir))
 
     try:

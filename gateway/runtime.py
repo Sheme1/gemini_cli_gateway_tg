@@ -29,6 +29,17 @@ class CommandProbe:
 
 
 @dataclass
+class PromptLatencySnapshot:
+    user_id: int
+    started_at: float
+    process_spawn_ms: int | None = None
+    init_ms: int | None = None
+    first_text_ms: int | None = None
+    total_ms: int | None = None
+    returncode: int | None = None
+
+
+@dataclass
 class GatewayRuntimeState:
     started_at: float = field(default_factory=time.time)
     bot_id: int | None = None
@@ -43,11 +54,15 @@ class GatewayRuntimeState:
     last_error: str = ""
     last_error_context: str = ""
     last_error_at: float | None = None
+    last_prompt_latency: PromptLatencySnapshot | None = None
 
     def record_error(self, exc: BaseException, context: str = "") -> None:
         self.last_error = _sanitize_error(f"{type(exc).__name__}: {exc}")
         self.last_error_context = context
         self.last_error_at = time.time()
+
+    def record_prompt_latency(self, snapshot: PromptLatencySnapshot) -> None:
+        self.last_prompt_latency = snapshot
 
     @property
     def uptime_seconds(self) -> int:
@@ -166,6 +181,7 @@ async def build_status_text(
     gemini = _probe_line(runtime_state.gemini_probe)
     node = _probe_line(runtime_state.node_probe)
     last_error = _last_error_line(runtime_state)
+    latency = _latency_line(runtime_state.last_prompt_latency)
 
     return (
         "🟢 <b>Статус шлюза</b>\n\n"
@@ -175,6 +191,7 @@ async def build_status_text(
         f"<b>Node.js:</b> {escape(node)}\n"
         f"<b>Working dir:</b> <code>{escape(config.gemini_working_dir)}</code>\n"
         f"<b>Активных запросов:</b> {session_manager.active_prompt_count()}\n"
+        f"<b>Последний запрос:</b> {escape(latency)}\n"
         f"<b>Webhook:</b> {escape(webhook_state)}"
         f" ({runtime_state.webhook_pending_updates or 0} pending)\n"
         f"<b>Последняя ошибка:</b> {escape(last_error)}"
@@ -244,6 +261,7 @@ def _runtime_snapshot(
         f"webhook_url={'set' if runtime_state.webhook_url else 'empty'}",
         f"webhook_pending_updates={runtime_state.webhook_pending_updates or 0}",
         f"active_prompt_users={session_manager.active_prompt_users()}",
+        f"last_prompt_latency={_latency_line(runtime_state.last_prompt_latency)}",
         f"last_error={_last_error_line(runtime_state)}",
     ]
     return "\n".join(lines)
@@ -264,3 +282,28 @@ def _format_duration(seconds: int) -> str:
 
 def _sanitize_error(text: str) -> str:
     return _TELEGRAM_TOKEN_RE.sub("<telegram-token>", text)
+
+
+def _latency_line(snapshot: PromptLatencySnapshot | None) -> str:
+    if snapshot is None:
+        return "нет данных"
+
+    parts = [
+        f"user={snapshot.user_id}",
+        f"spawn={_format_ms(snapshot.process_spawn_ms)}",
+        f"init={_format_ms(snapshot.init_ms)}",
+        f"first_text={_format_ms(snapshot.first_text_ms)}",
+        f"total={_format_ms(snapshot.total_ms)}",
+        f"rc={snapshot.returncode}",
+    ]
+    age = int(time.time() - snapshot.started_at)
+    parts.append(f"{age}s ago")
+    return ", ".join(parts)
+
+
+def _format_ms(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    if value >= 1000:
+        return f"{value / 1000:.1f}s"
+    return f"{value}ms"

@@ -4,6 +4,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from gateway.bot.keyboards import inline
+from gateway.bot.sessions import build_sessions_page
 from gateway.bot.ui import build_settings_text
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
@@ -55,29 +56,21 @@ async def command_sessions_handler(
     message: Message, session_manager: SessionManager
 ) -> None:
     """Обработчик команды /sessions."""
-    await message.answer("⏳ <i>Запрашиваю список диалогов...</i>", parse_mode="HTML")
+    status_message = await message.answer(
+        "⏳ <i>Запрашиваю список диалогов...</i>", parse_mode="HTML"
+    )
     try:
         sessions = await session_manager.get_sessions_list()
         if not sessions:
-            await message.answer("📂 Сохранённые диалоги не найдены.")
+            await status_message.edit_text("📂 Сохранённые диалоги не найдены.")
             return
 
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
-        from aiogram.types import InlineKeyboardButton
-
-        builder = InlineKeyboardBuilder()
-        text_lines = ["📂 <b>Доступные диалоги:</b>\n"]
-        for idx, (s_id, desc) in enumerate(sessions, 1):
-            text_lines.append(f"{idx}. <code>{s_id}</code>\n   {html.quote(desc)}")
-            builder.row(
-                InlineKeyboardButton(
-                    text=f"Открыть #{idx} ({s_id[:6]})", callback_data=f"resume_{s_id}"
-                )
-            )
-
-        await message.answer("\n".join(text_lines), reply_markup=builder.as_markup())
+        text, reply_markup = build_sessions_page(sessions)
+        await status_message.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
-        await message.answer(f"❌ Ошибка при получении сессий: {e}")
+        await status_message.edit_text(
+            f"❌ Ошибка при получении сессий: {html.quote(str(e))}"
+        )
 
 
 @router.message(Command("mcp"))
