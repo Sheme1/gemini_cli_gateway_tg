@@ -26,6 +26,11 @@ print_header() {
 
 fail() {
     echo "ERROR: $1" >&2
+    echo >&2
+    echo "Troubleshooting:" >&2
+    echo "  sudo systemctl status telegram-gateway --no-pager -l" >&2
+    echo "  sudo journalctl -u telegram-gateway -n 200 --no-pager" >&2
+    echo "  cd '${PROJECT_DIR}' && ${VENV_PYTHON} -m gateway.main --check-runtime" >&2
     exit 1
 }
 
@@ -63,10 +68,17 @@ fi
 [[ -f "${ENV_PATH}" ]] || fail "Missing ${ENV_PATH}. Copy .env.example to .env and configure the bot first."
 [[ -x "${VENV_PYTHON}" ]] || fail "Missing ${VENV_PYTHON}. Create .venv and install Python dependencies first."
 
-require_command gemini "gemini CLI was not found in PATH. Install @google/gemini-cli for this user first."
+GEMINI_CMD="$( (grep -E '^GEMINI_BIN=' "${ENV_PATH}" || true) | tail -n1 | cut -d= -f2-)"
+GEMINI_CMD="${GEMINI_CMD%\"}"
+GEMINI_CMD="${GEMINI_CMD#\"}"
+GEMINI_CMD="${GEMINI_CMD%\'}"
+GEMINI_CMD="${GEMINI_CMD#\'}"
+GEMINI_CMD="${GEMINI_CMD:-gemini}"
+
+require_command "${GEMINI_CMD}" "${GEMINI_CMD} was not found in PATH. Install @google/gemini-cli for this user first."
 require_command node "node was not found in PATH. Gemini CLI requires Node.js to run."
 
-GEMINI_BIN="$(command -v gemini)"
+GEMINI_BIN="$(command -v "${GEMINI_CMD}")"
 NODE_BIN="$(command -v node)"
 GEMINI_DIR="$(cd -- "$(dirname -- "${GEMINI_BIN}")" && pwd)"
 NODE_DIR="$(cd -- "$(dirname -- "${NODE_BIN}")" && pwd)"
@@ -94,6 +106,12 @@ sed \
 if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze verify "${TMP_SERVICE}" >/dev/null
 fi
+
+echo "Running runtime smoke check..."
+if ! (cd "${PROJECT_DIR}" && "${VENV_PYTHON}" -m gateway.main --check-runtime); then
+    fail "Runtime smoke check failed. Fix the diagnostics above and rerun install.sh."
+fi
+echo
 
 echo "Rendered systemd unit:"
 echo "----------------------------------------"

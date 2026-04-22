@@ -22,10 +22,12 @@ class Config:
 
     # === Gemini CLI ===
     gemini_model: str = "gemini-3-flash-preview"
+    gemini_bin: str = "gemini"
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
     gemini_artifact_roots: tuple[str, ...] = field(default_factory=tuple)
     gemini_cli_timeout: int = 600  # секунды
+    gemini_shutdown_grace_seconds: float = 5.0
     gemini_sandbox: bool = False
     gemini_stream_debug: bool = False
     gemini_soft_finalize_idle_seconds: int = 90
@@ -38,6 +40,15 @@ class Config:
     # === Стриминг ===
     stream_update_interval: float = 1.5  # секунды между editMessageText
     stream_max_message_length: int = 4096  # лимит Telegram
+    stream_min_update_chars: int = 120
+    stream_retry_max_delay: float = 30.0
+
+    # === Polling ===
+    polling_timeout: int = 10
+    polling_concurrency_limit: int = 4
+
+    # === State ===
+    gateway_state_dir: str = field(default_factory=lambda: str(Path(".gateway_state")))
 
     # === Аппрув ===
     approval_timeout: int = 120  # секунды до авто-отклонения
@@ -102,10 +113,14 @@ class Config:
         else:
             artifact_roots.append(str(working_dir))
 
+        state_dir_raw = os.getenv("GATEWAY_STATE_DIR", ".gateway_state").strip()
+        state_dir = Path(state_dir_raw or ".gateway_state").expanduser().resolve()
+
         return cls(
             telegram_bot_token=token,
             target_chat_id=target_chat_id,
             gemini_model=os.getenv("GEMINI_MODEL", cls.gemini_model),
+            gemini_bin=os.getenv("GEMINI_BIN", cls.gemini_bin),
             gemini_approval_mode=os.getenv(
                 "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
             ),
@@ -113,6 +128,12 @@ class Config:
             gemini_artifact_roots=tuple(dict.fromkeys(artifact_roots)),
             gemini_cli_timeout=int(
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
+            ),
+            gemini_shutdown_grace_seconds=float(
+                os.getenv(
+                    "GEMINI_SHUTDOWN_GRACE_SECONDS",
+                    str(cls.gemini_shutdown_grace_seconds),
+                )
             ),
             gemini_sandbox=sandbox,
             gemini_stream_debug=stream_debug,
@@ -141,11 +162,54 @@ class Config:
                     str(cls.stream_update_interval),
                 )
             ),
+            stream_min_update_chars=int(
+                os.getenv(
+                    "STREAM_MIN_UPDATE_CHARS",
+                    str(cls.stream_min_update_chars),
+                )
+            ),
+            stream_retry_max_delay=float(
+                os.getenv(
+                    "STREAM_RETRY_MAX_DELAY",
+                    str(cls.stream_retry_max_delay),
+                )
+            ),
+            polling_timeout=int(os.getenv("POLLING_TIMEOUT", str(cls.polling_timeout))),
+            polling_concurrency_limit=int(
+                os.getenv(
+                    "POLLING_CONCURRENCY_LIMIT",
+                    str(cls.polling_concurrency_limit),
+                )
+            ),
             approval_timeout=int(
                 os.getenv("APPROVAL_TIMEOUT", str(cls.approval_timeout))
             ),
+            gateway_state_dir=str(state_dir),
             log_level=os.getenv("LOG_LEVEL", cls.log_level).upper(),
         )
+
+    def redacted_dict(self) -> dict[str, object]:
+        """Вернуть безопасный для логов снимок конфигурации."""
+        return {
+            "telegram_bot_token": _mask_secret(self.telegram_bot_token),
+            "target_chat_id": self.target_chat_id,
+            "gemini_model": self.gemini_model,
+            "gemini_bin": self.gemini_bin,
+            "gemini_approval_mode": self.gemini_approval_mode,
+            "gemini_working_dir": self.gemini_working_dir,
+            "gemini_artifact_roots": self.gemini_artifact_roots,
+            "gemini_cli_timeout": self.gemini_cli_timeout,
+            "gemini_shutdown_grace_seconds": self.gemini_shutdown_grace_seconds,
+            "gemini_sandbox": self.gemini_sandbox,
+            "gemini_stream_debug": self.gemini_stream_debug,
+            "stream_update_interval": self.stream_update_interval,
+            "stream_min_update_chars": self.stream_min_update_chars,
+            "polling_timeout": self.polling_timeout,
+            "polling_concurrency_limit": self.polling_concurrency_limit,
+            "gateway_state_dir": self.gateway_state_dir,
+            "log_level": self.log_level,
+            "gemini_api_key": _mask_secret(self.gemini_api_key),
+        }
 
     @property
     def approval_mode_flag(self) -> list[str]:
@@ -161,3 +225,11 @@ class Config:
     def sandbox_flag(self) -> list[str]:
         """Аргумент --sandbox, если включён."""
         return ["--sandbox"] if self.gemini_sandbox else []
+
+
+def _mask_secret(value: str | None) -> str | None:
+    if not value:
+        return None
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}...{value[-4:]}"

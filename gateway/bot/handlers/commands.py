@@ -7,6 +7,11 @@ from gateway.bot.keyboards import inline
 from gateway.bot.ui import build_settings_text
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
+from gateway.runtime import (
+    GatewayRuntimeState,
+    build_diagnostics_text,
+    build_status_text,
+)
 from gateway.user_settings import UserSettingsStore
 
 router = Router(name="commands")
@@ -24,7 +29,9 @@ async def command_start_handler(
         f"Команды:\n"
         f"🔄 /new — начать новый диалог (очистить контекст)\n"
         f"📂 /sessions — список прошлых диалогов\n"
+        f"⏹ /cancel — остановить текущий запрос\n"
         f"⚙️ /settings — настройки отображения и режима работы\n"
+        f"🟢 /status — состояние шлюза\n"
         f"ℹ️ /help — справка"
     )
     # Начинаем новую сессию
@@ -75,7 +82,11 @@ async def command_sessions_handler(
 
 @router.message(Command("mcp"))
 async def command_mcp_handler(
-    message: Message, session_manager: SessionManager, bot: aiogram.Bot, config: Config
+    message: Message,
+    session_manager: SessionManager,
+    bot: aiogram.Bot,
+    config: Config,
+    user_settings: UserSettingsStore,
 ) -> None:
     """Обработчик команды /mcp."""
     args = message.text.split(maxsplit=1)
@@ -127,12 +138,17 @@ async def command_mcp_handler(
         gemini_prompt,
         session_manager,
         config,
+        user_settings,
     )
 
 
 @router.message(Command("skills"))
 async def command_skills_handler(
-    message: Message, session_manager: SessionManager, bot: aiogram.Bot, config: Config
+    message: Message,
+    session_manager: SessionManager,
+    bot: aiogram.Bot,
+    config: Config,
+    user_settings: UserSettingsStore,
 ) -> None:
     """Обработчик команды /skills."""
     args = message.text.split(maxsplit=1)
@@ -183,16 +199,54 @@ async def command_skills_handler(
         gemini_prompt,
         session_manager,
         config,
+        user_settings,
     )
 
 
 @router.message(Command("status"))
 async def command_status_handler(
-    message: Message, session_manager: SessionManager
+    message: Message,
+    session_manager: SessionManager,
+    config: Config,
+    bot: aiogram.Bot,
+    runtime_state: GatewayRuntimeState,
 ) -> None:
     """Обработчик команды /status."""
-    status_text = "🟢 Gemini CLI: шлюз работает в фоновом режиме."
+    status_text = await build_status_text(
+        config,
+        runtime_state,
+        session_manager,
+        bot=bot,
+        refresh_webhook=True,
+    )
     await message.answer(status_text)
+
+
+@router.message(Command("diagnostics"))
+async def command_diagnostics_handler(
+    message: Message,
+    session_manager: SessionManager,
+    config: Config,
+    runtime_state: GatewayRuntimeState,
+) -> None:
+    """Обработчик команды /diagnostics."""
+    await message.answer(build_diagnostics_text(config, runtime_state, session_manager))
+
+
+@router.message(Command("cancel"))
+async def command_cancel_handler(
+    message: Message,
+    session_manager: SessionManager,
+) -> None:
+    """Останавливает активный запрос Gemini для текущего пользователя."""
+    cancelled = await session_manager.cancel_active_prompt(
+        message.from_user.id,
+        reason="user requested /cancel",
+    )
+    if cancelled:
+        await message.answer("⏹ Активный запрос остановлен.")
+    else:
+        await message.answer("Активного запроса нет.")
 
 
 @router.message(Command("model"))
@@ -231,7 +285,9 @@ async def command_help_handler(message: Message) -> None:
         "/sessions — открыть один из прошлых диалогов\n"
         "/mcp — просмотреть MCP-серверы\n"
         "/skills — просмотреть навыки\n"
+        "/cancel — остановить текущий запрос\n"
         "/settings — открыть настройки отображения и режима работы\n"
         "/status — проверить состояние шлюза\n"
+        "/diagnostics — показать диагностический отчёт\n"
     )
     await message.answer(text)

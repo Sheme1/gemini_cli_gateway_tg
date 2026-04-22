@@ -83,6 +83,7 @@ Required:
 
 Optional but useful:
 
+- `GEMINI_BIN`
 - `TARGET_CHAT_ID`
 - `GEMINI_API_KEY`
 - `GEMINI_MODEL`
@@ -90,6 +91,12 @@ Optional but useful:
 - `GEMINI_WORKING_DIR`
 
 The full runtime configuration is documented in [.env.example](.env.example).
+
+Check the deployment runtime without starting polling:
+
+```bash
+python -m gateway.main --check-runtime
+```
 
 ### 5. Run locally
 
@@ -131,6 +138,7 @@ The installer:
 
 - detects the project root from the script location
 - verifies Linux, `systemd`, `sudo`, `gemini`, `node`, `.env`, and `.venv`
+- runs `python -m gateway.main --check-runtime` before installing the service
 - renders the `telegram-gateway.service` unit with the correct paths
 - sets an explicit `PATH` so the service can find `gemini` and `node`
 - installs and starts `telegram-gateway`
@@ -165,7 +173,9 @@ If you use Docker, remember that Gemini CLI auth lives inside the container volu
 | `/skills` | Show installed Gemini skills |
 | `/model` | Pick the active Gemini model |
 | `/settings` | Change render mode and approval mode |
-| `/status` | Show a simple gateway status |
+| `/cancel` | Stop the current Gemini request |
+| `/status` | Show gateway, Gemini, webhook, and runtime status |
+| `/diagnostics` | Show a redacted diagnostics report |
 | `/help` | Show the command summary |
 
 ## How it works

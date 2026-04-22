@@ -62,6 +62,8 @@ class ArtifactManager:
         self._inferred_candidates: list[str] = []
         self._sent_paths: set[Path] = set()
         self._stability_state: dict[Path, tuple[int, int, float]] = {}
+        self._last_fallback_scan_at = 0.0
+        self._fallback_scan_interval = max(5.0, config.artifact_watch_interval)
 
     def register_event(self, event: StreamEvent) -> None:
         if event.direct_file_candidates:
@@ -186,7 +188,11 @@ class ArtifactManager:
         elif inferred_paths:
             candidates = inferred_paths
         else:
-            candidates = self._scan_recent_files(started_at)
+            if checked_at - self._last_fallback_scan_at < self._fallback_scan_interval:
+                candidates = []
+            else:
+                self._last_fallback_scan_at = checked_at
+                candidates = self._scan_recent_files(started_at)
 
         ready_paths: list[Path] = []
         for path in candidates:

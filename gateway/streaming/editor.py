@@ -12,11 +12,21 @@ else:
     Bot = Any
 
 try:
-    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.exceptions import (
+        TelegramBadRequest,
+        TelegramNetworkError,
+        TelegramRetryAfter,
+    )
 except Exception:  # pragma: no cover - fallback для локальных сред без aiogram
 
     class TelegramBadRequest(Exception):
         pass
+
+    class TelegramNetworkError(Exception):
+        pass
+
+    class TelegramRetryAfter(Exception):
+        retry_after = 1
 
 
 class StreamEditor:
@@ -31,15 +41,21 @@ class StreamEditor:
         chat_id: int,
         interval: float = 1.5,
         max_length: int = 4096,
+        min_update_chars: int = 120,
+        retry_max_delay: float = 30.0,
     ):
         self.bot = bot
         self.chat_id = chat_id
         self.interval = interval
         self.max_length = max_length
+        self.min_update_chars = min_update_chars
+        self.retry_max_delay = retry_max_delay
 
         self.current_message_id: Optional[int] = None
         self.text_buffer = ""
         self.last_sent_text = ""
+        self._last_display_text = ""
+        self.status_line = ""
         self.last_update_task: Optional[asyncio.Task] = None
         self.is_flushing = False
         self._first_chunk = True
@@ -74,6 +90,7 @@ class StreamEditor:
                             chat_id=chat_id,
                             message_id=message_id,
                             text=stages[stage_idx],
+                            parse_mode=None,
                         )
                     except TelegramBadRequest:
                         pass
@@ -83,10 +100,16 @@ class StreamEditor:
             pass
 
     async def initialize(self, initial_text: str = "⏳ Генерирую ответ...") -> None:
-        msg = await self.bot.send_message(chat_id=self.chat_id, text=initial_text)
+        msg = await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=initial_text,
+            parse_mode=None,
+        )
         self.current_message_id = msg.message_id
         self.last_sent_text = initial_text
+        self._last_display_text = initial_text
         self.text_buffer = ""
+        self.status_line = ""
         self._first_chunk = True
         self._loading_task = asyncio.create_task(
             self._loading_animation(self.chat_id, self.current_message_id)
@@ -95,7 +118,9 @@ class StreamEditor:
     def attach_to_message(self, message_id: int, initial_text: str = "") -> None:
         self.current_message_id = message_id
         self.last_sent_text = initial_text
+        self._last_display_text = initial_text
         self.text_buffer = ""
+        self.status_line = ""
         self._first_chunk = False
 
     async def append_text(self, text_chunk: str) -> None:
@@ -112,7 +137,20 @@ class StreamEditor:
 
         if len(self.last_sent_text) + len(self.text_buffer) >= self.max_length:
             await self._flush_and_split()
-        elif self.last_update_task is None or self.last_update_task.done():
+        elif (self.last_update_task is None or self.last_update_task.done()) and (
+            not self.last_sent_text or len(self.text_buffer) >= self.min_update_chars
+        ):
+            self.last_update_task = asyncio.create_task(self._throttled_update())
+
+    async def set_status(self, status: str) -> None:
+        if self._first_chunk:
+            self._first_chunk = False
+            self.last_sent_text = ""
+            if self._loading_task and not self._loading_task.done():
+                self._loading_task.cancel()
+
+        self.status_line = status
+        if self.last_update_task is None or self.last_update_task.done():
             self.last_update_task = asyncio.create_task(self._throttled_update())
 
     async def _flush_and_split(self) -> None:
@@ -139,13 +177,17 @@ class StreamEditor:
                 await self._start_new_message()
 
     async def _start_new_message(self) -> None:
-        msg = await self.bot.send_message(chat_id=self.chat_id, text="…")
+        msg = await self.bot.send_message(
+            chat_id=self.chat_id,
+            text="…",
+            parse_mode=None,
+        )
         self.current_message_id = msg.message_id
         self.last_sent_text = ""
 
     async def _throttled_update(self) -> None:
         await asyncio.sleep(self.interval)
-        if not self.text_buffer or self.is_flushing:
+        if (not self.text_buffer and not self.status_line) or self.is_flushing:
             return
 
         full_text = self.last_sent_text + self.text_buffer
@@ -153,7 +195,7 @@ class StreamEditor:
             await self._flush_and_split()
             return
 
-        success = await self._raw_edit(full_text)
+        success = await self._raw_edit(self._with_status(full_text))
         if success:
             self.last_sent_text = full_text
             self.text_buffer = ""
@@ -162,18 +204,48 @@ class StreamEditor:
         if not self.current_message_id:
             return False
 
-        try:
-            await self.bot.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=self.current_message_id,
-                text=text or "…",
-            )
-            return True
-        except TelegramBadRequest as exc:
-            if "message is not modified" in str(exc):
+        network_delay = 1.0
+        for _attempt in range(4):
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=self.current_message_id,
+                    text=text or "…",
+                    parse_mode=None,
+                )
+                self._last_display_text = text or "…"
                 return True
-            logger.warning("Error editing message: %s", exc)
+            except TelegramRetryAfter as exc:
+                retry_after = float(getattr(exc, "retry_after", 1) or 1)
+                await asyncio.sleep(min(retry_after, self.retry_max_delay))
+            except TelegramNetworkError as exc:
+                logger.warning("Telegram network error while editing: %s", exc)
+                await asyncio.sleep(min(network_delay, self.retry_max_delay))
+                network_delay *= 2
+            except TelegramBadRequest as exc:
+                message = str(exc).lower()
+                if "message is not modified" in message:
+                    self._last_display_text = text or "…"
+                    return True
+                if self._should_fallback_to_new_message(message):
+                    return await self._send_replacement_message(text)
+                logger.warning("Error editing message: %s", exc)
+                return False
+        return False
+
+    async def _send_replacement_message(self, text: str) -> bool:
+        try:
+            msg = await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text or "…",
+                parse_mode=None,
+            )
+        except Exception as exc:
+            logger.warning("Error sending replacement message: %s", exc)
             return False
+        self.current_message_id = msg.message_id
+        self._last_display_text = text or "…"
+        return True
 
     async def flush(self) -> None:
         self.is_flushing = True
@@ -189,11 +261,15 @@ class StreamEditor:
             if len(full_text) > self.max_length:
                 await self._flush_and_split()
             else:
-                success = await self._raw_edit(full_text)
+                success = await self._raw_edit(self._with_status(full_text))
                 if not success:
                     break
                 self.last_sent_text = full_text
                 self.text_buffer = ""
+
+        final_text = self._with_status(self.last_sent_text)
+        if final_text != self._last_display_text:
+            await self._raw_edit(final_text)
 
         self.is_flushing = False
 
@@ -222,3 +298,23 @@ class StreamEditor:
                 return index + (0 if separator == " " else len(separator))
 
         return limit
+
+    def _with_status(self, text: str) -> str:
+        if not self.status_line:
+            return text
+        candidate = f"{text}\n\n{self.status_line}" if text else self.status_line
+        if len(candidate) <= self.max_length:
+            return candidate
+        return text
+
+    @staticmethod
+    def _should_fallback_to_new_message(error_message: str) -> bool:
+        return any(
+            marker in error_message
+            for marker in (
+                "message to edit not found",
+                "message can't be edited",
+                "message can't be modified",
+                "message identifier is not specified",
+            )
+        )

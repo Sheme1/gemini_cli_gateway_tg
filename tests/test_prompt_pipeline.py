@@ -25,11 +25,18 @@ class _FakeBot:
         self.messages: list[dict] = []
         self.documents: list[dict] = []
 
-    async def send_message(self, chat_id: int, text: str, reply_markup=None):
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup=None,
+        parse_mode=None,
+    ):
         message = {
             "chat_id": chat_id,
             "text": text,
             "reply_markup": reply_markup,
+            "parse_mode": parse_mode,
             "message_id": self._next_message_id,
         }
         self._next_message_id += 1
@@ -42,6 +49,7 @@ class _FakeBot:
         message_id: int,
         text: str,
         reply_markup=None,
+        parse_mode=None,
     ) -> None:
         self.messages.append(
             {
@@ -49,6 +57,7 @@ class _FakeBot:
                 "message_id": message_id,
                 "text": text,
                 "reply_markup": reply_markup,
+                "parse_mode": parse_mode,
                 "edited": True,
             }
         )
@@ -72,6 +81,9 @@ class _SoftFinalizeSessionManager:
         self.cancel_event = asyncio.Event()
         self.cancel_calls: list[str] = []
 
+    def has_active_prompt(self, _user_id: int) -> bool:
+        return False
+
     async def send_prompt(self, prompt, user_id, on_event, on_approval) -> None:
         del prompt, user_id, on_approval
         await on_event(
@@ -94,6 +106,9 @@ class _CompletingSessionManager:
     def __init__(self, artifact_path):
         self.artifact_path = artifact_path
         self.cancel_calls: list[str] = []
+
+    def has_active_prompt(self, _user_id: int) -> bool:
+        return False
 
     async def send_prompt(self, prompt, user_id, on_event, on_approval) -> None:
         del prompt, user_id, on_approval

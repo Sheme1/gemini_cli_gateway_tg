@@ -1,7 +1,7 @@
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 
 class AuthMiddleware(BaseMiddleware):
@@ -30,6 +30,9 @@ class AuthMiddleware(BaseMiddleware):
             if event.chat.id != self.target_chat_id:
                 # Опционально: можно логировать или отправлять предупреждение
                 # await event.answer("⚠️ Доступ запрещен. Бот привязан к другому чату.")
+                return
+        elif isinstance(event, CallbackQuery) and event.message:
+            if event.message.chat.id != self.target_chat_id:
                 return
 
         return await handler(event, data)

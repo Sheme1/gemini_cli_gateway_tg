@@ -5,6 +5,8 @@
 Description=Telegram Gateway for Gemini CLI
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -15,8 +17,9 @@ Environment=HOME=__HOME_DIR__
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=__SERVICE_PATH__
 ExecStart=__PYTHON_BIN__ -m gateway.main
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
 StandardOutput=journal
 StandardError=journal
 

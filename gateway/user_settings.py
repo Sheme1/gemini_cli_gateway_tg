@@ -12,8 +12,10 @@ VALID_RENDER_MODES = {"compact", "summary", "detailed"}
 class UserSettingsStore:
     """Простое persistent-хранилище пользовательских UI-настроек."""
 
-    def __init__(self, path: Path | None = None):
-        base_path = Path(__file__).resolve().parents[1] / ".gateway_state"
+    def __init__(self, path: Path | None = None, state_dir: Path | None = None):
+        base_path = state_dir or (
+            Path(__file__).resolve().parents[1] / ".gateway_state"
+        )
         self.path = path or (base_path / "user_settings.json")
         self._lock = threading.Lock()
         self._data: dict[str, dict[str, Any]] = self._load()

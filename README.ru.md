@@ -83,6 +83,7 @@ cp .env.example .env
 
 Опционально, но полезно:
 
+- `GEMINI_BIN`
 - `TARGET_CHAT_ID`
 - `GEMINI_API_KEY`
 - `GEMINI_MODEL`
@@ -90,6 +91,12 @@ cp .env.example .env
 - `GEMINI_WORKING_DIR`
 
 Полный набор параметров запуска описан в [.env.example](.env.example).
+
+Проверить окружение деплоя без запуска polling:
+
+```bash
+python -m gateway.main --check-runtime
+```
 
 ### 5. Запустите локально
 
@@ -131,6 +138,7 @@ chmod +x install.sh
 
 - определяет корень проекта по расположению скрипта
 - проверяет Linux, `systemd`, `sudo`, `gemini`, `node`, `.env` и `.venv`
+- запускает `python -m gateway.main --check-runtime` перед установкой сервиса
 - рендерит `telegram-gateway.service` с корректными путями
 - задаёт явный `PATH`, чтобы сервис видел `gemini` и `node`
 - устанавливает и запускает `telegram-gateway`
@@ -165,7 +173,9 @@ docker compose logs -f gateway
 | `/skills` | Показывает установленные Gemini skills |
 | `/model` | Позволяет выбрать активную модель Gemini |
 | `/settings` | Меняет режим отображения и режим подтверждений |
-| `/status` | Показывает простой статус шлюза |
+| `/cancel` | Останавливает текущий запрос Gemini |
+| `/status` | Показывает состояние шлюза, Gemini, webhook и runtime |
+| `/diagnostics` | Показывает redacted диагностический отчёт |
 | `/help` | Показывает краткую справку |
 
 ## Как это работает

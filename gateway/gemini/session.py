@@ -1,6 +1,9 @@
 import asyncio
 import logging
+import os
 import re
+import signal
+import subprocess
 from typing import Callable
 
 from gateway.config import Config
@@ -15,6 +18,41 @@ def strip_ansi_codes(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
+class BoundedTextBuffer:
+    """Хранит последние строки stderr без безлимитного роста памяти."""
+
+    def __init__(self, limit: int = 4000):
+        self.limit = limit
+        self._text = ""
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        self._text = (self._text + text)[-self.limit :]
+
+    def text(self) -> str:
+        return self._text.strip()
+
+
+def _build_process_error(returncode: int, stderr_text: str) -> str:
+    message = f"Gemini CLI завершился с кодом {returncode}."
+    if stderr_text:
+        return f"{message}\n\nstderr:\n{stderr_text[-1500:]}"
+    return f"{message}\nПроверьте авторизацию Gemini CLI, PATH/HOME и логи systemd."
+
+
+def _build_empty_stream_warning(stderr_text: str) -> str:
+    if stderr_text:
+        return (
+            "Gemini CLI завершился без ответа в stream-json.\n\n"
+            f"stderr:\n{stderr_text[-1500:]}"
+        )
+    return (
+        "Gemini CLI завершился без ответа. "
+        "Проверьте авторизацию Gemini CLI и системные логи."
+    )
+
+
 class SessionManager:
     """Управляет сессиями Gemini CLI."""
 
@@ -23,11 +61,31 @@ class SessionManager:
         # user_id -> gemini_session_id
         self.active_sessions: dict[int, str] = {}
         self.active_prompt_processes: dict[int, asyncio.subprocess.Process] = {}
+        self._prompt_locks: dict[int, asyncio.Lock] = {}
+        self._cancelled_processes: set[int] = set()
+
+    def has_active_prompt(self, user_id: int) -> bool:
+        process = self.active_prompt_processes.get(user_id)
+        return bool(process and process.returncode is None)
+
+    def active_prompt_count(self) -> int:
+        return sum(
+            1
+            for process in self.active_prompt_processes.values()
+            if process.returncode is None
+        )
+
+    def active_prompt_users(self) -> list[int]:
+        return [
+            user_id
+            for user_id, process in self.active_prompt_processes.items()
+            if process.returncode is None
+        ]
 
     async def get_sessions_list(self) -> list[tuple[str, str]]:
         """Возвращает актуальный список сессий: список кортежей (id, описание)."""
         process = await asyncio.create_subprocess_exec(
-            "gemini",
+            self.config.gemini_bin,
             "--list-sessions",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -70,7 +128,7 @@ class SessionManager:
     async def get_mcp_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список MCP серверов: (имя, включен_ли)."""
         process = await asyncio.create_subprocess_exec(
-            "gemini",
+            self.config.gemini_bin,
             "mcp",
             "list",
             stdout=asyncio.subprocess.PIPE,
@@ -111,7 +169,7 @@ class SessionManager:
     async def get_skills_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список Skills: (имя, включен_ли)."""
         process = await asyncio.create_subprocess_exec(
-            "gemini",
+            self.config.gemini_bin,
             "skills",
             "list",
             stdout=asyncio.subprocess.PIPE,
@@ -164,7 +222,7 @@ class SessionManager:
     async def toggle_mcp(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
         process = await asyncio.create_subprocess_exec(
-            "gemini",
+            self.config.gemini_bin,
             "mcp",
             cmd,
             name,
@@ -178,7 +236,7 @@ class SessionManager:
     async def toggle_skill(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
         process = await asyncio.create_subprocess_exec(
-            "gemini",
+            self.config.gemini_bin,
             "skills",
             cmd,
             name,
@@ -215,11 +273,50 @@ class SessionManager:
             user_id,
             f" ({reason})" if reason else "",
         )
-        try:
-            process.kill()
-        except ProcessLookupError:
-            return False
+        self._cancelled_processes.add(id(process))
+        await self._terminate_process(process)
         return True
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
+        grace = self.config.gemini_shutdown_grace_seconds
+        self._send_signal(process, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace)
+            return
+        except asyncio.TimeoutError:
+            logger.warning("Gemini process did not stop after %.1fs; killing.", grace)
+        except ProcessLookupError:
+            return
+
+        self._send_signal(process, getattr(signal, "SIGKILL", signal.SIGTERM))
+        try:
+            await process.wait()
+        except ProcessLookupError:
+            pass
+
+    def _send_signal(
+        self,
+        process: asyncio.subprocess.Process,
+        sig: signal.Signals,
+    ) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            pid = getattr(process, "pid", None)
+            if os.name != "nt" and pid:
+                os.killpg(pid, sig)
+            elif sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except (LookupError, ProcessLookupError):
+            return
+        except AttributeError:
+            # Test doubles may only implement kill().
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
 
     async def send_prompt(
         self,
@@ -229,8 +326,31 @@ class SessionManager:
         on_approval: Callable[[dict], asyncio.Future],
     ) -> None:
         """Отправить промпт в одноразовый процесс и стримить ответ."""
+        lock = self._prompt_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await on_event(
+                StreamEvent(
+                    event_type="warning",
+                    warning_message=(
+                        "У вас уже выполняется запрос. "
+                        "Дождитесь ответа или используйте /cancel."
+                    ),
+                )
+            )
+            return
+
+        async with lock:
+            await self._send_prompt_locked(prompt, user_id, on_event, on_approval)
+
+    async def _send_prompt_locked(
+        self,
+        prompt: str,
+        user_id: int,
+        on_event: Callable[[StreamEvent], asyncio.Future],
+        on_approval: Callable[[dict], asyncio.Future],
+    ) -> None:
         args = [
-            "gemini",
+            self.config.gemini_bin,
             "-m",
             self.config.gemini_model,
             "-o",
@@ -245,14 +365,26 @@ class SessionManager:
         if session_id:
             args.extend(["--resume", session_id])
 
-        logger.info(f"Spawning Gemini for user {user_id}: {' '.join(args)}")
+        logger.info(
+            "Spawning Gemini for user %s: %s",
+            user_id,
+            " ".join(arg if arg != prompt else "<prompt>" for arg in args),
+        )
         logger.debug(f"Prompt preview: {prompt[:100]}...")
+
+        process_kwargs = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "cwd": self.config.gemini_working_dir,
+        }
+        if os.name == "nt":
+            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            process_kwargs["start_new_session"] = True
 
         process = await asyncio.create_subprocess_exec(
             *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,  # Отбрасываем stderr — избегаем deadlock
-            cwd=self.config.gemini_working_dir,
+            **process_kwargs,
         )
         self.active_prompt_processes[user_id] = process
 
@@ -260,10 +392,27 @@ class SessionManager:
         heartbeat_interval = 30  # Heartbeat каждые 30 секунд
         last_activity = asyncio.get_event_loop().time()
         heartbeat_task = None
+        stderr_task = None
+        stderr_buffer = BoundedTextBuffer()
         tool_names_by_id: dict[str, str] = {}
         seen_assistant_text = False
+        seen_result = False
+        emitted_terminal_warning = False
+        approval_requested = False
         logged_tool_before_text = False
+        assistant_snapshot = ""
         log_stream = logger.info if self.config.gemini_stream_debug else logger.debug
+
+        async def read_stderr() -> None:
+            if not process.stderr:
+                return
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                text = strip_ansi_codes(line.decode("utf-8", errors="replace"))
+                stderr_buffer.append(text)
+                log_stream("[GEMINI STDERR] %s", text.rstrip())
 
         async def send_heartbeat():
             """Периодически отправляет heartbeat если нет активности."""
@@ -288,6 +437,7 @@ class SessionManager:
         try:
             # Запускаем heartbeat task
             heartbeat_task = asyncio.create_task(send_heartbeat())
+            stderr_task = asyncio.create_task(read_stderr())
 
             while True:
                 try:
@@ -301,7 +451,8 @@ class SessionManager:
                 except asyncio.TimeoutError:
                     elapsed = int(asyncio.get_event_loop().time() - last_activity)
                     logger.warning(f"Gemini CLI timeout after {elapsed}s of inactivity")
-                    process.kill()
+                    emitted_terminal_warning = True
+                    await self._terminate_process(process)
 
                     # Проверяем был ли хоть какой-то output
                     if elapsed > 0:
@@ -360,6 +511,19 @@ class SessionManager:
                         bool(event.invalid_stream_reason),
                     )
 
+                if event.event_type == "assistant_text":
+                    original_text = event.assistant_text
+                    if not event.message_delta:
+                        if original_text == assistant_snapshot:
+                            event.assistant_text = ""
+                        elif original_text.startswith(assistant_snapshot):
+                            event.assistant_text = original_text[
+                                len(assistant_snapshot) :
+                            ]
+                        assistant_snapshot = original_text
+                    else:
+                        assistant_snapshot += original_text
+
                 if event.event_type == "tool_use" and event.tool_id and event.tool_name:
                     tool_names_by_id[event.tool_id] = event.tool_name
 
@@ -389,10 +553,15 @@ class SessionManager:
                         f"Captured session_id: {event.session_id} for user {user_id}"
                     )
 
-                if event.event_type and event.event_type not in {
-                    "init",
-                    "approval_request",
-                }:
+                if (
+                    event.event_type
+                    and event.event_type
+                    not in {
+                        "init",
+                        "approval_request",
+                    }
+                    and (event.event_type != "assistant_text" or event.assistant_text)
+                ):
                     await on_event(event)
 
                 if event.event_type == "invalid_stream":
@@ -401,6 +570,7 @@ class SessionManager:
 
                 if event.is_empty_response:
                     logger.warning("Received empty response, notifying user...")
+                    emitted_terminal_warning = True
                     await on_event(
                         StreamEvent(
                             event_type="warning",
@@ -413,10 +583,12 @@ class SessionManager:
                     break
 
                 if event.approval_request:
+                    approval_requested = True
                     await on_approval(event.approval_request)
                     break
 
                 if event.is_done:
+                    seen_result = True
                     break
 
         finally:
@@ -431,10 +603,55 @@ class SessionManager:
             # Гарантируем что процесс завершён
             if process.returncode is None:
                 try:
-                    process.kill()
-                except ProcessLookupError:
+                    await asyncio.wait_for(process.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    await self._terminate_process(process)
+            else:
+                await process.wait()
+
+            if stderr_task and not stderr_task.done():
+                try:
+                    await asyncio.wait_for(stderr_task, timeout=1)
+                except asyncio.TimeoutError:
+                    stderr_task.cancel()
+                except asyncio.CancelledError:
                     pass
-            await process.wait()
+
+            cancelled_by_gateway = id(process) in self._cancelled_processes
+            self._cancelled_processes.discard(id(process))
+
+            if (
+                process.returncode
+                and process.returncode != 0
+                and not emitted_terminal_warning
+                and not approval_requested
+                and not cancelled_by_gateway
+            ):
+                await on_event(
+                    StreamEvent(
+                        event_type="error",
+                        error_message=_build_process_error(
+                            process.returncode,
+                            stderr_buffer.text(),
+                        ),
+                    )
+                )
+            elif (
+                not seen_assistant_text
+                and not seen_result
+                and not emitted_terminal_warning
+                and not approval_requested
+                and not cancelled_by_gateway
+            ):
+                await on_event(
+                    StreamEvent(
+                        event_type="warning",
+                        warning_message=_build_empty_stream_warning(
+                            stderr_buffer.text()
+                        ),
+                    )
+                )
+
             if self.active_prompt_processes.get(user_id) is process:
                 self.active_prompt_processes.pop(user_id, None)
 

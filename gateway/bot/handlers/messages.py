@@ -71,11 +71,23 @@ async def process_gemini_prompt(
     initial_text: str = "",
 ) -> None:
     """Общий pipeline потокового вывода для любых входящих запросов."""
+    if session_manager.has_active_prompt(user_id):
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "⏳ Предыдущий запрос ещё выполняется.\n"
+                "Дождитесь ответа или отправьте /cancel."
+            ),
+        )
+        return
+
     streamer = StreamEditor(
         bot=bot,
         chat_id=chat_id,
         interval=config.stream_update_interval,
         max_length=config.stream_max_message_length,
+        min_update_chars=config.stream_min_update_chars,
+        retry_max_delay=config.stream_retry_max_delay,
     )
     artifact_manager = ArtifactManager(config)
     render_mode = user_settings.get_render_mode(user_id)
@@ -100,7 +112,14 @@ async def process_gemini_prompt(
         artifact_manager.register_event(event)
         rendered = render_event(event, render_mode)
         if rendered:
-            await streamer.append_text(rendered)
+            if render_mode == "compact" and event.event_type in {
+                "heartbeat",
+                "tool_use",
+                "tool_result",
+            }:
+                await streamer.set_status(rendered.strip())
+            else:
+                await streamer.append_text(rendered)
 
     async def on_approval(req: dict) -> None:
         logger.info("Получен запрос на подтверждение: %s", req)
@@ -148,6 +167,7 @@ async def process_gemini_prompt(
                         "\n\n⚠️ Gemini CLI не прислал финальный result, "
                         "но итоговый файл уже готов. Завершаю ответ мягко."
                     )
+                    await streamer.set_status("")
                     await streamer.flush()
                     await session_manager.cancel_active_prompt(
                         user_id,
@@ -186,6 +206,7 @@ async def process_gemini_prompt(
                 await watcher_task
             except asyncio.CancelledError:
                 pass
+        await streamer.set_status("")
         await streamer.flush()
         try:
             await artifact_manager.send_artifacts(

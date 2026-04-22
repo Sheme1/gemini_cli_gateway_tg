@@ -1,6 +1,11 @@
+import asyncio
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 import uuid
+
+import pytest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from gateway.bot.ui import build_settings_text
 from gateway.config import Config
@@ -42,6 +47,103 @@ def test_stream_editor_splits_text_without_breaking_beginning() -> None:
 
     assert chunk.startswith("Первая строка")
     assert remainder.startswith("Вторая")
+
+
+class _FakeBot:
+    def __init__(self, failures=None) -> None:
+        self._next_message_id = 1
+        self.failures = list(failures or [])
+        self.sent: list[dict] = []
+        self.edits: list[dict] = []
+
+    async def send_message(self, chat_id: int, text: str, parse_mode=None):
+        message = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "message_id": self._next_message_id,
+        }
+        self._next_message_id += 1
+        self.sent.append(message)
+        return SimpleNamespace(message_id=message["message_id"])
+
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode=None,
+    ) -> None:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": parse_mode,
+            }
+        )
+        if self.failures:
+            raise self.failures.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_does_not_keep_status_in_final_answer() -> None:
+    bot = _FakeBot()
+    editor = StreamEditor(bot=bot, chat_id=1, interval=0)
+
+    await editor.initialize("loading")
+    await editor.append_text("Ответ")
+    await editor.set_status("⏳ Выполняю шаг")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert bot.edits[-1]["text"] == "Ответ\n\n⏳ Выполняю шаг"
+
+    await editor.set_status("")
+    await editor.flush()
+
+    assert bot.edits[-1]["text"] == "Ответ"
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_falls_back_to_new_message_when_edit_is_gone() -> None:
+    bot = _FakeBot(
+        failures=[
+            TelegramBadRequest(
+                method=None,  # type: ignore[arg-type]
+                message="Bad Request: message to edit not found",
+            )
+        ]
+    )
+    editor = StreamEditor(bot=bot, chat_id=1, interval=0)
+
+    await editor.initialize("loading")
+    await editor.append_text("Ответ")
+    await editor.flush()
+
+    assert bot.sent[-1]["text"] == "Ответ"
+    assert editor.current_message_id == bot.sent[-1]["message_id"]
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_retries_after_telegram_rate_limit() -> None:
+    bot = _FakeBot(
+        failures=[
+            TelegramRetryAfter(
+                method=None,  # type: ignore[arg-type]
+                message="Too Many Requests",
+                retry_after=0,
+            )
+        ]
+    )
+    editor = StreamEditor(bot=bot, chat_id=1, interval=0)
+
+    await editor.initialize("loading")
+    await editor.append_text("Ответ")
+    await editor.flush()
+
+    assert len(bot.edits) == 2
+    assert bot.edits[-1]["text"] == "Ответ"
 
 
 def test_user_settings_store_persists_render_mode() -> None:
