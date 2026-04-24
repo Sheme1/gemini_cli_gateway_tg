@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from gateway.model_presets import DEFAULT_MODEL_PRESET, MODEL_PRESETS
 from gateway.bot.ui import (
     APPROVAL_MODE_LABELS,
     RENDER_MODE_LABELS,
@@ -9,22 +10,36 @@ from gateway.bot.ui import (
 )
 
 
-def get_models_keyboard(current_model: str) -> InlineKeyboardMarkup:
+def get_models_keyboard(
+    current_model: str,
+    current_preset: str = DEFAULT_MODEL_PRESET,
+    fallback_model: str | None = None,
+) -> InlineKeyboardMarkup:
     """Клавиатура для выбора модели Gemini."""
-    models = [
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview",
-        "gemini-3.1-flash-lite-preview",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-    ]
-
     builder = InlineKeyboardBuilder()
-    for model in models:
-        text = f"✅ {model}" if model == current_model else model
-        builder.button(text=text, callback_data=f"model:{model}")
+    env_model = fallback_model or current_model
+    env_text = f"Из .env: {env_model}"
+    if current_preset == DEFAULT_MODEL_PRESET:
+        env_text = f"✅ {env_text}"
+    builder.button(text=env_text, callback_data=f"model:{DEFAULT_MODEL_PRESET}")
+
+    for preset in MODEL_PRESETS.values():
+        text = f"{preset.label}: {preset.model}"
+        if current_preset == preset.key or (
+            current_preset == DEFAULT_MODEL_PRESET and current_model == preset.model
+        ):
+            text = f"✅ {text}"
+        builder.button(text=text, callback_data=f"model:{preset.key}")
 
     builder.adjust(1)  # По одной кнопке в ряд
+    return builder.as_markup()
+
+
+def get_prompt_guard_keyboard(token: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="▶️ Отправить в Gemini", callback_data=f"prompt:confirm:{token}")
+    builder.button(text="❌ Отменить", callback_data=f"prompt:cancel:{token}")
+    builder.adjust(1)
     return builder.as_markup()
 
 

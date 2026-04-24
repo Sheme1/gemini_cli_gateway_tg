@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from gateway.config import Config
+from gateway.doctor import run_doctor
 from gateway.runtime import (
     CommandProbe,
     GatewayRuntimeState,
@@ -36,6 +37,13 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         monkeypatch.setenv("POLLING_CONCURRENCY_LIMIT", "7")
         monkeypatch.setenv("STREAM_MIN_UPDATE_CHARS", "88")
         monkeypatch.setenv("STREAM_RETRY_MAX_DELAY", "12")
+        monkeypatch.setenv("PROMPT_WARN_CHARS", "99")
+        monkeypatch.setenv("PROMPT_MAX_CHARS", "999")
+        monkeypatch.setenv("PROMPT_CONFIRM_TIMEOUT", "33")
+        monkeypatch.setenv("USER_DAILY_TOKEN_LIMIT", "1000")
+        monkeypatch.setenv("GLOBAL_DAILY_TOKEN_LIMIT", "2000")
+        monkeypatch.setenv("LOG_MODE", "debug")
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
         monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
 
         config = Config.from_env()
@@ -50,6 +58,13 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.polling_concurrency_limit == 7
         assert config.stream_min_update_chars == 88
         assert config.stream_retry_max_delay == 12
+        assert config.prompt_warn_chars == 99
+        assert config.prompt_max_chars == 999
+        assert config.prompt_confirm_timeout == 33
+        assert config.user_daily_token_limit == 1000
+        assert config.global_daily_token_limit == 2000
+        assert config.log_mode == "debug"
+        assert config.log_level == "DEBUG"
         assert config.gateway_state_dir == str((tmp_path / "state").resolve())
         assert config.redacted_dict()["telegram_bot_token"] == "1234...oken"
     finally:
@@ -145,5 +160,33 @@ async def test_startup_preflight_deletes_existing_webhook(monkeypatch) -> None:
         assert state.bot_username == "gateway_bot"
         assert state.gemini_probe.version == "1.0"
         assert (tmp_path / "state").is_dir()
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_doctor_warns_on_gemini_version_mismatch(monkeypatch) -> None:
+    tmp_path = make_test_dir()
+    try:
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:secret-token")
+        monkeypatch.setenv("GEMINI_WORKING_DIR", str(tmp_path))
+        monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("GEMINI_TARGET_VERSION", "0.38.2")
+
+        async def fake_probe(command: str, *_args, cwd=None):
+            del cwd
+            version = "0.39.0" if "gemini" in command else "v22.0.0"
+            return CommandProbe(
+                command=command, path=f"/bin/{command}", version=version
+            )
+
+        monkeypatch.setattr("gateway.doctor.probe_command", fake_probe)
+
+        report = await run_doctor()
+
+        gemini_check = next(check for check in report.checks if check.name == "gemini")
+        assert gemini_check.status == "warn"
+        assert "0.38.2" in gemini_check.hint
+        assert not report.has_errors
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

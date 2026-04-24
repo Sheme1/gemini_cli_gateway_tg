@@ -186,3 +186,22 @@ def test_user_settings_store_persists_render_mode() -> None:
         assert reloaded.get_render_mode(42) == "detailed"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_user_settings_store_persists_model_preset() -> None:
+    tmp_path = make_test_dir()
+    try:
+        store = UserSettingsStore(path=tmp_path / "user_settings.json")
+
+        store.set_model_preset(42, "quality")
+
+        reloaded = UserSettingsStore(path=tmp_path / "user_settings.json")
+        assert reloaded.get_model_preset(42) == "quality"
+        assert reloaded.get_effective_model(42, "fallback-model") == (
+            "gemini-3.1-pro-preview"
+        )
+
+        reloaded.set_model_preset(42, "env")
+        assert reloaded.get_effective_model(42, "fallback-model") == "fallback-model"
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)

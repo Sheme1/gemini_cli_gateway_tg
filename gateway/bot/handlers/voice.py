@@ -11,6 +11,8 @@ from aiogram.types import Message
 from gateway.bot.handlers.messages import process_gemini_prompt
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
+from gateway.prompt_guard import PendingPromptStore
+from gateway.usage import UsageLedger
 from gateway.user_settings import UserSettingsStore
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,8 @@ async def voice_handler(
     config: Config,
     bot: Any,
     user_settings: UserSettingsStore,
+    usage_ledger: UsageLedger,
+    prompt_guard: PendingPromptStore,
 ) -> None:
     """Обрабатывает голосовые сообщения: транскрибирует и передает в Gemini CLI."""
     if not config.gemini_api_key:
@@ -115,6 +119,8 @@ async def voice_handler(
             session_manager=session_manager,
             config=config,
             user_settings=user_settings,
+            usage_ledger=usage_ledger,
+            prompt_guard=prompt_guard,
             initial_message_id=status_message.message_id,
             initial_text=prompt_info,
         )

@@ -323,9 +323,54 @@ async def test_session_manager_passes_include_directories(monkeypatch) -> None:
         user_id=123,
         on_event=on_event,
         on_approval=on_approval,
+        model="gemini-2.5-flash",
     )
 
+    assert captured_args[captured_args.index("-m") + 1] == "gemini-2.5-flash"
     assert "--include-directories" in captured_args
     assert captured_args[captured_args.index("--include-directories") + 1] == (
         "/repo/shared,/repo/docs"
     )
+
+
+@pytest.mark.asyncio
+async def test_session_manager_deletes_session_by_source_index(monkeypatch) -> None:
+    captured_args = []
+
+    async def fake_get_sessions_list():
+        return [
+            parse_gemini_sessions_output(
+                "1. Old (2 days ago) [old-session]\n2. New (Just now) [new-session]\n"
+            )[0]
+        ]
+
+    class _DeleteProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"deleted", b""
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        captured_args.extend(args)
+        return _DeleteProcess()
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+    )
+    manager = SessionManager(config)
+    manager.active_sessions[42] = "new-session"
+    monkeypatch.setattr(manager, "get_sessions_list", fake_get_sessions_list)
+
+    deleted = await manager.delete_session_by_id("new-session")
+
+    assert deleted is True
+    assert captured_args[0].lower().endswith(("gemini", "gemini.cmd"))
+    assert captured_args[1:] == ["--delete-session", "2"]
+    assert manager.get_active_session(42) is None

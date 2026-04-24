@@ -13,14 +13,21 @@ from aiogram.types import BotCommand
 from gateway.bot.handlers import callbacks, commands, errors, messages, voice
 from gateway.bot.middleware.auth import AuthMiddleware
 from gateway.config import Config
+from gateway.doctor import format_doctor_json, format_doctor_text, run_doctor
 from gateway.gemini.session import SessionManager
+from gateway.prompt_guard import PendingPromptStore
 from gateway.runtime import GatewayRuntimeState, build_status_text, startup_preflight
+from gateway.usage import UsageLedger
 from gateway.user_settings import UserSettingsStore
 
 logger = logging.getLogger(__name__)
 
 
 def configure_logging(level_name: str = "INFO") -> None:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        pass
     logging.basicConfig(
         level=getattr(logging, level_name.upper(), logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -28,8 +35,17 @@ def configure_logging(level_name: str = "INFO") -> None:
     )
 
 
-async def main(check_runtime: bool = False) -> None:
+async def main(
+    check_runtime: bool = False,
+    doctor: bool = False,
+    doctor_json: bool = False,
+) -> None:
     configure_logging()
+
+    if doctor or doctor_json:
+        report = await run_doctor()
+        print(format_doctor_json(report) if doctor_json else format_doctor_text(report))
+        sys.exit(1 if report.has_errors else 0)
 
     try:
         config = Config.from_env()
@@ -56,6 +72,8 @@ async def main(check_runtime: bool = False) -> None:
     # Инициализация SessionManager
     session_manager = SessionManager(config=config, runtime_state=runtime_state)
     user_settings = UserSettingsStore(state_dir=Path(config.gateway_state_dir))
+    usage_ledger = UsageLedger(state_dir=Path(config.gateway_state_dir))
+    prompt_guard = PendingPromptStore()
 
     try:
         await startup_preflight(config, bot, runtime_state)
@@ -90,6 +108,9 @@ async def main(check_runtime: bool = False) -> None:
             BotCommand(command="settings", description="Настройки бота и вывода"),
             BotCommand(command="status", description="Статус шлюза Gemini"),
             BotCommand(command="diagnostics", description="Диагностика шлюза"),
+            BotCommand(command="doctor", description="Проверка окружения gateway"),
+            BotCommand(command="context", description="Текущий контекст и модель"),
+            BotCommand(command="usage", description="Расход токенов за день"),
             BotCommand(command="cancel", description="Остановить текущий запрос"),
             BotCommand(command="help", description="Справка"),
         ]
@@ -100,6 +121,8 @@ async def main(check_runtime: bool = False) -> None:
         config=config,
         user_settings=user_settings,
         runtime_state=runtime_state,
+        usage_ledger=usage_ledger,
+        prompt_guard=prompt_guard,
     )
 
     # Регистрация middlewares
@@ -142,9 +165,27 @@ if __name__ == "__main__":
         action="store_true",
         help="Run startup diagnostics and exit without polling.",
     )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Run local environment diagnostics without Telegram API checks.",
+    )
+    parser.add_argument(
+        "--doctor-json",
+        action="store_true",
+        help="Run local environment diagnostics and print JSON.",
+    )
     args = parser.parse_args()
 
     try:
-        asyncio.run(main(check_runtime=args.check_runtime))
-    except (KeyboardInterrupt, SystemExit):
+        asyncio.run(
+            main(
+                check_runtime=args.check_runtime,
+                doctor=args.doctor,
+                doctor_json=args.doctor_json,
+            )
+        )
+    except KeyboardInterrupt:
         logger.info("Shutting down gracefully.")
+    except SystemExit:
+        raise

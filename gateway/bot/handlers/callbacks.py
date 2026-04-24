@@ -3,7 +3,7 @@ import time
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery
+from aiogram.types import BufferedInputFile, CallbackQuery
 
 from gateway.bot.keyboards import inline
 from gateway.bot.sessions import build_sessions_page
@@ -18,6 +18,9 @@ from gateway.bot.ui import (
 )
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
+from gateway.model_presets import get_model_preset_label
+from gateway.prompt_guard import PendingPromptStore
+from gateway.usage import UsageLedger
 from gateway.user_settings import UserSettingsStore
 
 logger = logging.getLogger(__name__)
@@ -32,19 +35,30 @@ REFRESH_COOLDOWN_SECONDS = 3  # 3 секунды между обновления
 
 @router.callback_query(F.data.startswith("model:"))
 async def callback_model(
-    callback: CallbackQuery, config: Config, session_manager: SessionManager
+    callback: CallbackQuery,
+    config: Config,
+    session_manager: SessionManager,
+    user_settings: UserSettingsStore,
 ) -> None:
     """Изменение модели с перезапуском сессии."""
     new_model = callback.data.split(":")[1]
+    current_preset = user_settings.get_model_preset(callback.from_user.id)
 
-    if new_model == config.gemini_model:
-        await callback.answer("Эта модель уже выбрана", show_alert=True)
+    if new_model == current_preset:
+        await callback.answer("Этот пресет уже выбран", show_alert=True)
         return
 
-    object.__setattr__(config, "gemini_model", new_model)
+    selected_preset = user_settings.set_model_preset(callback.from_user.id, new_model)
+    effective_model = user_settings.get_effective_model(
+        callback.from_user.id,
+        config.gemini_model,
+    )
 
     await callback.message.edit_text(
-        f"🔄 Модель изменена на <b>{new_model}</b>.\nТекущий диалог сброшен.",
+        "🔄 Модель изменена.\n\n"
+        f"<b>Пресет:</b> {get_model_preset_label(selected_preset)}\n"
+        f"<b>Модель:</b> <code>{effective_model}</code>\n\n"
+        "Текущий диалог сброшен.",
         reply_markup=None,
     )
 
@@ -89,6 +103,50 @@ async def callback_sessions_refresh(
 ) -> None:
     page = _parse_session_page(callback.data, prefix="session:refresh:")
     await _edit_sessions_page(callback, session_manager, page, refreshed=True)
+
+
+@router.callback_query(F.data.startswith("session:delete:"))
+async def callback_delete_session(
+    callback: CallbackQuery,
+    session_manager: SessionManager,
+) -> None:
+    session_id = callback.data.split(":", maxsplit=2)[2]
+    deleted = await session_manager.delete_session_by_id(session_id)
+    if not deleted:
+        await callback.answer("Сессия уже не найдена", show_alert=True)
+        return
+
+    sessions = await session_manager.get_sessions_list()
+    if not sessions:
+        await callback.message.edit_text("📂 Сохранённые диалоги не найдены.")
+    else:
+        text, reply_markup = build_sessions_page(sessions)
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    await callback.answer("Сессия удалена")
+
+
+@router.callback_query(F.data == "session:export")
+async def callback_export_sessions(
+    callback: CallbackQuery,
+    session_manager: SessionManager,
+) -> None:
+    sessions = await session_manager.get_sessions_list()
+    if not sessions:
+        await callback.answer("Список пуст", show_alert=True)
+        return
+    lines = ["Gemini CLI sessions", ""]
+    for index, session in enumerate(sessions, start=1):
+        current = " current" if session.is_current else ""
+        lines.append(
+            f"{index}. {session.title} ({session.relative_time}{current}) "
+            f"[{session.session_id}]"
+        )
+    payload = "\n".join(lines).encode("utf-8")
+    await callback.message.answer_document(
+        BufferedInputFile(payload, filename="gemini-sessions.txt"),
+        caption="Экспорт списка сессий Gemini CLI",
+    )
+    await callback.answer("Экспорт готов")
 
 
 @router.callback_query(F.data.startswith("resume_"))
@@ -261,6 +319,73 @@ async def callback_set_approval(
     await session_manager.reset(callback.from_user.id)
     await callback.message.answer("✅ Готово. Новый режим применён.")
     await callback.answer()
+
+
+# ======================== Prompt guard ========================
+
+
+@router.callback_query(F.data.startswith("prompt:confirm:"))
+async def callback_prompt_confirm(
+    callback: CallbackQuery,
+    bot,
+    session_manager: SessionManager,
+    config: Config,
+    user_settings: UserSettingsStore,
+    usage_ledger: UsageLedger,
+    prompt_guard: PendingPromptStore,
+) -> None:
+    token = callback.data.split(":", maxsplit=2)[2]
+    item = prompt_guard.get(token)
+    if item is None:
+        await callback.message.edit_text(
+            "⌛ Подтверждение истекло. Отправьте запрос ещё раз."
+        )
+        await callback.answer("Подтверждение истекло", show_alert=True)
+        return
+    if item.user_id != callback.from_user.id:
+        await callback.answer(
+            "Это подтверждение для другого пользователя", show_alert=True
+        )
+        return
+
+    prompt_guard.discard(token)
+    initial_text = "✅ Запрос подтверждён. Запускаю Gemini..."
+    await callback.message.edit_text(initial_text, reply_markup=None)
+    await callback.answer()
+
+    from gateway.bot.handlers.messages import process_gemini_prompt
+
+    await process_gemini_prompt(
+        bot=bot,
+        chat_id=item.chat_id,
+        user_id=item.user_id,
+        prompt=item.prompt,
+        session_manager=session_manager,
+        config=config,
+        user_settings=user_settings,
+        usage_ledger=usage_ledger,
+        prompt_guard=prompt_guard,
+        initial_message_id=callback.message.message_id,
+        initial_text=initial_text,
+        skip_prompt_guard=True,
+    )
+
+
+@router.callback_query(F.data.startswith("prompt:cancel:"))
+async def callback_prompt_cancel(
+    callback: CallbackQuery,
+    prompt_guard: PendingPromptStore,
+) -> None:
+    token = callback.data.split(":", maxsplit=2)[2]
+    item = prompt_guard.get(token)
+    if item is not None and item.user_id != callback.from_user.id:
+        await callback.answer(
+            "Это подтверждение для другого пользователя", show_alert=True
+        )
+        return
+    prompt_guard.discard(token)
+    await callback.message.edit_text("❌ Запрос отменён.", reply_markup=None)
+    await callback.answer("Отменено")
 
 
 # ======================== MCP & Skills ========================

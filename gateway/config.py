@@ -22,6 +22,7 @@ class Config:
 
     # === Gemini CLI ===
     gemini_model: str = "gemini-3-flash-preview"
+    gemini_target_version: str = "0.38.2"
     gemini_bin: str = "gemini"
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
@@ -44,6 +45,15 @@ class Config:
     stream_min_update_chars: int = 120
     stream_retry_max_delay: float = 30.0
 
+    # === Prompt safety ===
+    prompt_warn_chars: int = 12000
+    prompt_max_chars: int = 60000
+    prompt_confirm_timeout: int = 120
+
+    # === Usage limits ===
+    user_daily_token_limit: int = 0
+    global_daily_token_limit: int = 0
+
     # === Polling ===
     polling_timeout: int = 10
     polling_concurrency_limit: int = 4
@@ -55,10 +65,16 @@ class Config:
     approval_timeout: int = 120  # секунды до авто-отклонения
 
     # === Логирование ===
+    log_mode: str = "normal"
     log_level: str = "INFO"
 
     @classmethod
-    def from_env(cls, env_path: Optional[str] = None) -> Config:
+    def from_env(
+        cls,
+        env_path: Optional[str] = None,
+        *,
+        require_telegram_token: bool = True,
+    ) -> Config:
         """Загрузить конфигурацию из .env файла и переменных окружения."""
         if env_path:
             load_dotenv(env_path)
@@ -67,10 +83,12 @@ class Config:
 
         token = os.getenv("TELEGRAM_BOT_TOKEN")
         if not token:
-            raise ValueError(
-                "TELEGRAM_BOT_TOKEN не задан. "
-                "Укажите его в .env файле или переменной окружения."
-            )
+            if require_telegram_token:
+                raise ValueError(
+                    "TELEGRAM_BOT_TOKEN не задан. "
+                    "Укажите его в .env файле или переменной окружения."
+                )
+            token = "__missing_telegram_bot_token__"
 
         # Парсинг TARGET_CHAT_ID
         chat_id_raw = os.getenv("TARGET_CHAT_ID", "").strip()
@@ -126,6 +144,9 @@ class Config:
             telegram_bot_token=token,
             target_chat_id=target_chat_id,
             gemini_model=os.getenv("GEMINI_MODEL", cls.gemini_model),
+            gemini_target_version=os.getenv(
+                "GEMINI_TARGET_VERSION", cls.gemini_target_version
+            ),
             gemini_bin=os.getenv("GEMINI_BIN", cls.gemini_bin),
             gemini_approval_mode=os.getenv(
                 "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
@@ -181,6 +202,30 @@ class Config:
                     str(cls.stream_retry_max_delay),
                 )
             ),
+            prompt_warn_chars=int(
+                os.getenv("PROMPT_WARN_CHARS", str(cls.prompt_warn_chars))
+            ),
+            prompt_max_chars=int(
+                os.getenv("PROMPT_MAX_CHARS", str(cls.prompt_max_chars))
+            ),
+            prompt_confirm_timeout=int(
+                os.getenv(
+                    "PROMPT_CONFIRM_TIMEOUT",
+                    str(cls.prompt_confirm_timeout),
+                )
+            ),
+            user_daily_token_limit=int(
+                os.getenv(
+                    "USER_DAILY_TOKEN_LIMIT",
+                    str(cls.user_daily_token_limit),
+                )
+            ),
+            global_daily_token_limit=int(
+                os.getenv(
+                    "GLOBAL_DAILY_TOKEN_LIMIT",
+                    str(cls.global_daily_token_limit),
+                )
+            ),
             polling_timeout=int(os.getenv("POLLING_TIMEOUT", str(cls.polling_timeout))),
             polling_concurrency_limit=int(
                 os.getenv(
@@ -192,7 +237,11 @@ class Config:
                 os.getenv("APPROVAL_TIMEOUT", str(cls.approval_timeout))
             ),
             gateway_state_dir=str(state_dir),
-            log_level=os.getenv("LOG_LEVEL", cls.log_level).upper(),
+            log_mode=_normalize_log_mode(os.getenv("LOG_MODE", cls.log_mode)),
+            log_level=_resolve_log_level(
+                os.getenv("LOG_MODE", cls.log_mode),
+                os.getenv("LOG_LEVEL"),
+            ),
         )
 
     def redacted_dict(self) -> dict[str, object]:
@@ -201,6 +250,7 @@ class Config:
             "telegram_bot_token": _mask_secret(self.telegram_bot_token),
             "target_chat_id": self.target_chat_id,
             "gemini_model": self.gemini_model,
+            "gemini_target_version": self.gemini_target_version,
             "gemini_bin": self.gemini_bin,
             "gemini_approval_mode": self.gemini_approval_mode,
             "gemini_working_dir": self.gemini_working_dir,
@@ -218,10 +268,16 @@ class Config:
             "stream_update_interval": self.stream_update_interval,
             "stream_min_update_chars": self.stream_min_update_chars,
             "stream_retry_max_delay": self.stream_retry_max_delay,
+            "prompt_warn_chars": self.prompt_warn_chars,
+            "prompt_max_chars": self.prompt_max_chars,
+            "prompt_confirm_timeout": self.prompt_confirm_timeout,
+            "user_daily_token_limit": self.user_daily_token_limit,
+            "global_daily_token_limit": self.global_daily_token_limit,
             "polling_timeout": self.polling_timeout,
             "polling_concurrency_limit": self.polling_concurrency_limit,
             "gateway_state_dir": self.gateway_state_dir,
             "approval_timeout": self.approval_timeout,
+            "log_mode": self.log_mode,
             "log_level": self.log_level,
             "gemini_api_key": _mask_secret(self.gemini_api_key),
         }
@@ -255,6 +311,22 @@ def _mask_secret(value: str | None) -> str | None:
     if len(value) <= 8:
         return "***"
     return f"{value[:4]}...{value[-4:]}"
+
+
+def _normalize_log_mode(value: str | None) -> str:
+    normalized = (value or "normal").strip().lower()
+    if normalized in {"quiet", "normal", "debug"}:
+        return normalized
+    return "normal"
+
+
+def _resolve_log_level(log_mode: str | None, log_level: str | None) -> str:
+    if log_level and log_level.strip():
+        return log_level.strip().upper()
+    return {
+        "quiet": "WARNING",
+        "debug": "DEBUG",
+    }.get(_normalize_log_mode(log_mode), "INFO")
 
 
 def _parse_existing_directories(raw_value: str, env_name: str) -> list[str]:

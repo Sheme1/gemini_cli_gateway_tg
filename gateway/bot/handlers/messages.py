@@ -13,7 +13,9 @@ from gateway.bot.keyboards import inline
 from gateway.config import Config
 from gateway.gemini.renderer import render_event
 from gateway.gemini.session import SessionManager
+from gateway.prompt_guard import PendingPromptStore
 from gateway.streaming.editor import StreamEditor
+from gateway.usage import UsageLedger
 from gateway.user_settings import UserSettingsStore
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,8 @@ async def message_handler(
     config: Config,
     bot: Any,
     user_settings: UserSettingsStore,
+    usage_ledger: UsageLedger,
+    prompt_guard: PendingPromptStore,
 ) -> None:
     """Обрабатывает текстовые сообщения и отправляет их в Gemini CLI."""
     prompt = message.text
@@ -56,6 +60,8 @@ async def message_handler(
         session_manager=session_manager,
         config=config,
         user_settings=user_settings,
+        usage_ledger=usage_ledger,
+        prompt_guard=prompt_guard,
     )
 
 
@@ -67,10 +73,56 @@ async def process_gemini_prompt(
     session_manager: SessionManager,
     config: Config,
     user_settings: UserSettingsStore,
+    usage_ledger: UsageLedger | None = None,
+    prompt_guard: PendingPromptStore | None = None,
     initial_message_id: int | None = None,
     initial_text: str = "",
+    skip_prompt_guard: bool = False,
 ) -> None:
     """Общий pipeline потокового вывода для любых входящих запросов."""
+    if usage_ledger is not None:
+        allowed, reason = usage_ledger.can_start_request(
+            user_id,
+            user_limit=config.user_daily_token_limit,
+            global_limit=config.global_daily_token_limit,
+        )
+        if not allowed:
+            await bot.send_message(chat_id=chat_id, text=f"⛔ {reason}")
+            return
+
+    if prompt_guard is not None and not skip_prompt_guard:
+        prompt_length = len(prompt)
+        if prompt_length > config.prompt_max_chars:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⛔ Запрос слишком большой.\n\n"
+                    f"Размер: {prompt_length} символов.\n"
+                    f"Максимум: {config.prompt_max_chars} символов.\n\n"
+                    "Сократите текст или отправьте задачу несколькими сообщениями."
+                ),
+            )
+            return
+        if prompt_length > config.prompt_warn_chars:
+            pending = prompt_guard.put(
+                user_id=user_id,
+                chat_id=chat_id,
+                prompt=prompt,
+                ttl_seconds=config.prompt_confirm_timeout,
+            )
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⚠️ Запрос большой и может долго выполняться или потратить "
+                    "много токенов.\n\n"
+                    f"Размер: {prompt_length} символов.\n"
+                    f"Порог предупреждения: {config.prompt_warn_chars} символов.\n"
+                    f"Подтверждение действует {config.prompt_confirm_timeout} сек."
+                ),
+                reply_markup=inline.get_prompt_guard_keyboard(pending.token),
+            )
+            return
+
     if session_manager.has_active_prompt(user_id):
         await bot.send_message(
             chat_id=chat_id,
@@ -91,6 +143,11 @@ async def process_gemini_prompt(
     )
     artifact_manager = ArtifactManager(config)
     render_mode = user_settings.get_render_mode(user_id)
+    effective_model = getattr(
+        user_settings,
+        "get_effective_model",
+        lambda _user_id, fallback_model: fallback_model,
+    )(user_id, config.gemini_model)
     started_at = time.time()
     last_event_at = time.monotonic()
     saw_tool_activity = False
@@ -109,6 +166,13 @@ async def process_gemini_prompt(
             saw_tool_activity = True
         if event.event_type == "result_stats":
             saw_result = True
+            if usage_ledger is not None:
+                usage_ledger.record_request(
+                    user_id,
+                    model=effective_model,
+                    total_tokens=event.total_tokens,
+                    duration_ms=event.duration_ms,
+                )
         artifact_manager.register_event(event)
         rendered = render_event(event, render_mode)
         if rendered:
@@ -184,14 +248,24 @@ async def process_gemini_prompt(
     prompt_task = None
     watcher_task = None
     try:
-        prompt_task = asyncio.create_task(
-            session_manager.send_prompt(
+        try:
+            prompt_coro = session_manager.send_prompt(
+                prompt=prompt,
+                user_id=user_id,
+                on_event=on_event,
+                on_approval=on_approval,
+                model=effective_model,
+            )
+        except TypeError as exc:
+            if "model" not in str(exc):
+                raise
+            prompt_coro = session_manager.send_prompt(
                 prompt=prompt,
                 user_id=user_id,
                 on_event=on_event,
                 on_approval=on_approval,
             )
-        )
+        prompt_task = asyncio.create_task(prompt_coro)
         watcher_task = asyncio.create_task(
             watch_artifacts_and_soft_finalize(prompt_task)
         )

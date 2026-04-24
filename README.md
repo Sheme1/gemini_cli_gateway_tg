@@ -38,9 +38,11 @@ Gemini CLI is great in the terminal, but sometimes you want that same workflow f
 - Three output modes: `compact`, `summary`, `detailed`
 - MCP list and toggle UI
 - Skills list and toggle UI
+- Per-user model presets: `cheap`, `fast`, `balanced`, `quality`
+- Oversized prompt confirmation and daily token usage tracking
 - Voice message transcription through Gemini API
 - Automatic artifact discovery and file delivery
-- Runtime diagnostics, latency timings, and `/cancel`
+- Runtime diagnostics, local `doctor`, latency timings, and `/cancel`
 - `systemd`-first deployment for Linux servers
 - Docker as a secondary deployment option
 
@@ -92,6 +94,13 @@ Check the deployment runtime without starting polling:
 python -m gateway.main --check-runtime
 ```
 
+Run local checks without contacting Telegram:
+
+```bash
+python -m gateway.main --doctor
+python -m gateway.main --doctor-json
+```
+
 ### Environment reference
 
 Use plain `KEY=value` lines in `.env`. Do not wrap values in quotes unless your
@@ -103,6 +112,7 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `TARGET_CHAT_ID` | No | Numeric chat/user id. Leave empty to allow every chat that can reach the bot. Set it for a private single-user gateway. |
 | `GEMINI_BIN` | No | Gemini executable name or absolute path. Use `gemini` when it is available through `PATH`; use `/home/user/.npm-global/bin/gemini` for systemd if needed. |
 | `GEMINI_MODEL` | No | Model passed to `gemini -m`, for example `gemini-3-flash-preview`. Faster models reduce model latency but do not remove MCP/skills. |
+| `GEMINI_TARGET_VERSION` | No | Expected Gemini CLI version for `doctor`. Defaults to `0.38.2`; mismatch is a warning, not a startup blocker. |
 | `GEMINI_APPROVAL_MODE` | No | One of `default`, `auto_edit`, `yolo`, `plan`. `yolo` passes `--yolo`; the others pass `--approval-mode=...`. |
 | `GEMINI_WORKING_DIR` | No | Main project/work directory for Gemini CLI. Keep it as narrow as practical to reduce startup scanning. |
 | `GEMINI_INCLUDE_DIRECTORIES` | No | Extra directories for Gemini workspace access, comma-separated. Example: `/srv/project/shared,/srv/docs`. Passed as `--include-directories`. |
@@ -118,11 +128,17 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `STREAM_UPDATE_INTERVAL` | No | Minimum seconds between normal Telegram edit updates after the first answer chunk. |
 | `STREAM_MIN_UPDATE_CHARS` | No | Minimum buffered character delta before another streamed edit is scheduled. |
 | `STREAM_RETRY_MAX_DELAY` | No | Maximum seconds to sleep when Telegram asks the bot to retry later. |
+| `PROMPT_WARN_CHARS` | No | Prompt length that triggers an inline confirmation before sending to Gemini. |
+| `PROMPT_MAX_CHARS` | No | Hard prompt length limit. Requests above this value are rejected before starting Gemini. |
+| `PROMPT_CONFIRM_TIMEOUT` | No | Seconds before an oversized prompt confirmation expires. |
+| `USER_DAILY_TOKEN_LIMIT` | No | Per-user daily token limit from Gemini result stats. `0` disables the limit. |
+| `GLOBAL_DAILY_TOKEN_LIMIT` | No | Global daily token limit from Gemini result stats. `0` disables the limit. |
 | `POLLING_TIMEOUT` | No | Telegram long-polling timeout passed to aiogram. |
 | `POLLING_CONCURRENCY_LIMIT` | No | Maximum concurrent update handlers. Per-user prompt locks still prevent overlapping Gemini prompts. |
 | `GATEWAY_STATE_DIR` | No | Writable gateway state directory for user settings. Relative paths resolve from the process working directory. |
 | `APPROVAL_TIMEOUT` | No | Seconds before pending interactive approval expires. Headless approval is still limited by Gemini CLI behavior. |
-| `LOG_LEVEL` | No | Python logging level, usually `INFO` or `DEBUG`. |
+| `LOG_MODE` | No | `quiet`, `normal`, or `debug`. Controls default Python logging level. |
+| `LOG_LEVEL` | No | Legacy explicit Python logging level override. Leave empty to use `LOG_MODE`. |
 
 ### 5. Run locally
 
@@ -194,11 +210,14 @@ If you use Docker, remember that Gemini CLI auth lives inside the container volu
 | --- | --- |
 | `/start` | Reset the current user session and show the intro message |
 | `/new` | Start a fresh Gemini conversation |
-| `/sessions` | Page through saved Gemini sessions, newest first, and resume one |
+| `/sessions` | Page through saved Gemini sessions, resume, delete, or export the list as TXT |
 | `/mcp` | Show installed MCP servers |
 | `/skills` | Show installed Gemini skills |
 | `/model` | Pick the active Gemini model |
 | `/settings` | Change render mode and approval mode |
+| `/context` | Show the current user model, preset, session id, and workspace |
+| `/usage` | Show daily token usage and the last request stats |
+| `/doctor` | Run local gateway environment diagnostics |
 | `/cancel` | Stop the current Gemini request |
 | `/status` | Show gateway, Gemini, webhook, and runtime status |
 | `/diagnostics` | Show a redacted diagnostics report |
@@ -223,6 +242,10 @@ Telegram page. Gemini CLI does not expose a structured JSON session list in
 The first real answer chunk is edited into Telegram immediately. Later edits are
 coalesced by `STREAM_UPDATE_INTERVAL` and `STREAM_MIN_UPDATE_CHARS` to avoid
 Telegram flood limits.
+
+Model selection is stored per Telegram user in `GATEWAY_STATE_DIR`; the `.env`
+model is the fallback. Usage counters are stored in `usage.json` and contain
+only totals and last-request metadata, never prompt text.
 
 ACP (`gemini --acp`) is not the default transport. In Gemini CLI 0.38.2 it is a
 JSON-RPC/stdio mode mainly intended for IDE and editor integrations. This

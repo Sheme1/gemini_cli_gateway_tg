@@ -9,6 +9,8 @@ import pytest
 from gateway.bot.handlers.messages import process_gemini_prompt
 from gateway.config import Config
 from gateway.gemini.parser import StreamEvent
+from gateway.prompt_guard import PendingPromptStore
+from gateway.usage import UsageLedger
 
 
 def make_test_dir() -> Path:
@@ -210,5 +212,99 @@ async def test_process_prompt_sends_file_once_before_normal_completion() -> None
         assert [doc["filename"] for doc in bot.documents] == ["referat.docx"]
         assert not session_manager.cancel_calls
         assert any("Готово." in msg["text"] for msg in bot.messages)
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_prompt_warns_before_large_prompt() -> None:
+    tmp_path = make_test_dir()
+    try:
+        bot = _FakeBot()
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(tmp_path),
+            gemini_artifact_roots=(str(tmp_path),),
+            prompt_warn_chars=5,
+            prompt_max_chars=100,
+        )
+
+        await process_gemini_prompt(
+            bot=bot,
+            chat_id=1,
+            user_id=42,
+            prompt="long prompt",
+            session_manager=_CompletingSessionManager(tmp_path / "x.txt"),
+            config=config,
+            user_settings=_FakeUserSettings(),
+            prompt_guard=PendingPromptStore(),
+        )
+
+        assert "Запрос большой" in bot.messages[-1]["text"]
+        assert bot.messages[-1]["reply_markup"] is not None
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_prompt_blocks_prompt_over_hard_limit() -> None:
+    tmp_path = make_test_dir()
+    try:
+        bot = _FakeBot()
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(tmp_path),
+            gemini_artifact_roots=(str(tmp_path),),
+            prompt_warn_chars=5,
+            prompt_max_chars=8,
+        )
+
+        await process_gemini_prompt(
+            bot=bot,
+            chat_id=1,
+            user_id=42,
+            prompt="too long prompt",
+            session_manager=_CompletingSessionManager(tmp_path / "x.txt"),
+            config=config,
+            user_settings=_FakeUserSettings(),
+            prompt_guard=PendingPromptStore(),
+        )
+
+        assert "слишком большой" in bot.messages[-1]["text"]
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_prompt_records_usage_tokens() -> None:
+    tmp_path = make_test_dir()
+    try:
+        bot = _FakeBot()
+        artifact = tmp_path / "referat.docx"
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(tmp_path),
+            gemini_artifact_roots=(str(tmp_path),),
+            stream_update_interval=0.01,
+            artifact_watch_interval=0.02,
+            artifact_stable_seconds=0.01,
+        )
+        usage_ledger = UsageLedger(tmp_path / "state")
+
+        await process_gemini_prompt(
+            bot=bot,
+            chat_id=1,
+            user_id=42,
+            prompt="test",
+            session_manager=_CompletingSessionManager(artifact),
+            config=config,
+            user_settings=_FakeUserSettings(),
+            usage_ledger=usage_ledger,
+        )
+
+        snapshot = usage_ledger.snapshot(42)
+        assert snapshot.user_tokens == 12
+        assert snapshot.global_tokens == 12
+        assert snapshot.last_request["model"] == config.gemini_model
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

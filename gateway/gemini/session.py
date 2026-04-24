@@ -3,12 +3,14 @@ import logging
 import os
 import re
 import signal
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from typing import Callable
 
 from gateway.config import Config
+from gateway.gemini.error_classifier import classify_gemini_error
 from gateway.gemini.parser import GeminiStreamParser, StreamEvent
 from gateway.runtime import GatewayRuntimeState, PromptLatencySnapshot
 
@@ -109,10 +111,12 @@ class BoundedTextBuffer:
 
 
 def _build_process_error(returncode: int, stderr_text: str) -> str:
-    message = f"Gemini CLI завершился с кодом {returncode}."
-    if stderr_text:
-        return f"{message}\n\nstderr:\n{stderr_text[-1500:]}"
-    return f"{message}\nПроверьте авторизацию Gemini CLI, PATH/HOME и логи systemd."
+    details = (
+        f"Gemini CLI завершился с кодом {returncode}.\n\nstderr:\n{stderr_text[-1500:]}"
+        if stderr_text
+        else f"Gemini CLI завершился с кодом {returncode}."
+    )
+    return classify_gemini_error(details, returncode=returncode).format_for_user()
 
 
 def _build_empty_stream_warning(stderr_text: str) -> str:
@@ -165,10 +169,13 @@ class SessionManager:
             if process.returncode is None
         ]
 
+    def _gemini_executable(self) -> str:
+        return shutil.which(self.config.gemini_bin) or self.config.gemini_bin
+
     async def get_sessions_list(self) -> list[GeminiSessionInfo]:
         """Вернуть список сессий Gemini CLI, отсортированный от новых к старым."""
         process = await asyncio.create_subprocess_exec(
-            self.config.gemini_bin,
+            self._gemini_executable(),
             "--list-sessions",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -190,7 +197,7 @@ class SessionManager:
     async def get_mcp_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список MCP серверов: (имя, включен_ли)."""
         process = await asyncio.create_subprocess_exec(
-            self.config.gemini_bin,
+            self._gemini_executable(),
             "mcp",
             "list",
             stdout=asyncio.subprocess.PIPE,
@@ -231,7 +238,7 @@ class SessionManager:
     async def get_skills_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список Skills: (имя, включен_ли)."""
         process = await asyncio.create_subprocess_exec(
-            self.config.gemini_bin,
+            self._gemini_executable(),
             "skills",
             "list",
             stdout=asyncio.subprocess.PIPE,
@@ -284,7 +291,7 @@ class SessionManager:
     async def toggle_mcp(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
         process = await asyncio.create_subprocess_exec(
-            self.config.gemini_bin,
+            self._gemini_executable(),
             "mcp",
             cmd,
             name,
@@ -298,7 +305,7 @@ class SessionManager:
     async def toggle_skill(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
         process = await asyncio.create_subprocess_exec(
-            self.config.gemini_bin,
+            self._gemini_executable(),
             "skills",
             cmd,
             name,
@@ -325,6 +332,42 @@ class SessionManager:
     async def set_active_session(self, user_id: int, session_id: str) -> None:
         self.active_sessions[user_id] = session_id
         logger.info(f"Set active session {session_id} for user {user_id}")
+
+    def get_active_session(self, user_id: int) -> str | None:
+        return self.active_sessions.get(user_id)
+
+    async def delete_session_by_id(self, session_id: str) -> bool:
+        sessions = await self.get_sessions_list()
+        target = next(
+            (session for session in sessions if session.session_id == session_id),
+            None,
+        )
+        if target is None:
+            return False
+
+        process = await asyncio.create_subprocess_exec(
+            self._gemini_executable(),
+            "--delete-session",
+            str(target.source_index),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.config.gemini_working_dir,
+        )
+        stdout, stderr = await process.communicate()
+        output = (
+            stdout.decode("utf-8", errors="replace")
+            + "\n"
+            + stderr.decode("utf-8", errors="replace")
+        )
+        if process.returncode != 0:
+            raise RuntimeError(
+                "gemini --delete-session failed with code "
+                f"{process.returncode}: {strip_ansi_codes(output).strip()[:1000]}"
+            )
+        for user_id, active_session_id in list(self.active_sessions.items()):
+            if active_session_id == session_id:
+                self.active_sessions.pop(user_id, None)
+        return True
 
     async def cancel_active_prompt(self, user_id: int, reason: str = "") -> bool:
         process = self.active_prompt_processes.get(user_id)
@@ -386,6 +429,7 @@ class SessionManager:
         user_id: int,
         on_event: Callable[[StreamEvent], asyncio.Future],
         on_approval: Callable[[dict], asyncio.Future],
+        model: str | None = None,
     ) -> None:
         """Отправить промпт в одноразовый процесс и стримить ответ."""
         lock = self._prompt_locks.setdefault(user_id, asyncio.Lock())
@@ -402,7 +446,13 @@ class SessionManager:
             return
 
         async with lock:
-            await self._send_prompt_locked(prompt, user_id, on_event, on_approval)
+            await self._send_prompt_locked(
+                prompt,
+                user_id,
+                on_event,
+                on_approval,
+                model=model,
+            )
 
     async def _send_prompt_locked(
         self,
@@ -410,11 +460,13 @@ class SessionManager:
         user_id: int,
         on_event: Callable[[StreamEvent], asyncio.Future],
         on_approval: Callable[[dict], asyncio.Future],
+        model: str | None = None,
     ) -> None:
+        effective_model = model or self.config.gemini_model
         args = [
-            self.config.gemini_bin,
+            self._gemini_executable(),
             "-m",
-            self.config.gemini_model,
+            effective_model,
             "-o",
             "stream-json",
             "-p",
@@ -429,11 +481,12 @@ class SessionManager:
             args.extend(["--resume", session_id])
 
         logger.info(
-            "Spawning Gemini for user %s: %s",
+            "Spawning Gemini for user %s with model %s: %s",
             user_id,
+            effective_model,
             " ".join(arg if arg != prompt else "<prompt>" for arg in args),
         )
-        logger.debug(f"Prompt preview: {prompt[:100]}...")
+        logger.debug("Prompt length for user %s: %s chars", user_id, len(prompt))
 
         process_kwargs = {
             "stdout": asyncio.subprocess.PIPE,
@@ -448,10 +501,19 @@ class SessionManager:
         loop = asyncio.get_running_loop()
         prompt_started_at = time.time()
         prompt_start = loop.time()
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            **process_kwargs,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                **process_kwargs,
+            )
+        except FileNotFoundError as exc:
+            await on_event(
+                StreamEvent(
+                    event_type="error",
+                    error_message=classify_gemini_error(str(exc)).format_for_user(),
+                )
+            )
+            return
         process_spawn_ms = _elapsed_ms(prompt_start, loop.time())
         self.active_prompt_processes[user_id] = process
 

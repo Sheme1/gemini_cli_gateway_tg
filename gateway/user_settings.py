@@ -5,6 +5,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from gateway.model_presets import DEFAULT_MODEL_PRESET, MODEL_PRESETS, resolve_model
+
 DEFAULT_RENDER_MODE = "compact"
 VALID_RENDER_MODES = {"compact", "summary", "detailed"}
 
@@ -34,6 +36,34 @@ class UserSettingsStore:
         with self._lock:
             payload = self._data.setdefault(str(user_id), {})
             payload["render_mode"] = normalized
+            self._write_locked()
+        return normalized
+
+    def get_model_preset(self, user_id: int) -> str:
+        with self._lock:
+            value = self._data.get(str(user_id), {}).get(
+                "model_preset", DEFAULT_MODEL_PRESET
+            )
+        if value == DEFAULT_MODEL_PRESET or value in MODEL_PRESETS:
+            return value
+        return DEFAULT_MODEL_PRESET
+
+    def get_effective_model(self, user_id: int, fallback_model: str) -> str:
+        return resolve_model(self.get_model_preset(user_id), fallback_model)
+
+    def set_model_preset(self, user_id: int, model_preset: str) -> str:
+        normalized = (
+            model_preset
+            if model_preset == DEFAULT_MODEL_PRESET or model_preset in MODEL_PRESETS
+            else DEFAULT_MODEL_PRESET
+        )
+        with self._lock:
+            payload = self._data.setdefault(str(user_id), {})
+            payload["model_preset"] = normalized
+            if normalized == DEFAULT_MODEL_PRESET:
+                payload.pop("model", None)
+            else:
+                payload["model"] = MODEL_PRESETS[normalized].model
             self._write_locked()
         return normalized
 

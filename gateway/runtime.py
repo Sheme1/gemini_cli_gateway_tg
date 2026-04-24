@@ -74,7 +74,7 @@ async def probe_command(
 ) -> CommandProbe:
     executable = shutil.which(command) or command
     process = await asyncio.create_subprocess_exec(
-        command,
+        executable,
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

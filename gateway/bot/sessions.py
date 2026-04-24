@@ -42,7 +42,11 @@ def build_sessions_page(
             InlineKeyboardButton(
                 text=f"Открыть #{display_index}",
                 callback_data=f"session:open:{session.session_id}",
-            )
+            ),
+            InlineKeyboardButton(
+                text="Удалить",
+                callback_data=f"session:delete:{session.session_id}",
+            ),
         )
 
     nav_buttons: list[InlineKeyboardButton] = []
@@ -67,7 +71,11 @@ def build_sessions_page(
         InlineKeyboardButton(
             text="🔄 Обновить",
             callback_data=f"session:refresh:{safe_page}",
-        )
+        ),
+        InlineKeyboardButton(
+            text="⬇️ Экспорт TXT",
+            callback_data="session:export",
+        ),
     )
 
     return "\n".join(text_lines).rstrip(), builder.as_markup()
