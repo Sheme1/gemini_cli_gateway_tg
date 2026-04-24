@@ -14,3 +14,11 @@ def test_error_classifier_detects_invalid_model() -> None:
 
     assert hint.code == "invalid_model"
     assert "Модель" in hint.title
+
+
+def test_error_classifier_detects_untrusted_workspace() -> None:
+    hint = classify_gemini_error("FatalUntrustedWorkspaceError: untrusted workspace")
+
+    assert hint.code == "untrusted_workspace"
+    assert "рабочей папке" in hint.title
+    assert "GEMINI_SKIP_TRUST" in hint.fix

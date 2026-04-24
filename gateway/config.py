@@ -22,8 +22,9 @@ class Config:
 
     # === Gemini CLI ===
     gemini_model: str = "gemini-3-flash-preview"
-    gemini_target_version: str = "0.38.2"
+    gemini_target_version: str = "0.39.1"
     gemini_bin: str = "gemini"
+    gemini_skip_trust: bool = True
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
     gemini_include_directories: tuple[str, ...] = field(default_factory=tuple)
@@ -102,6 +103,10 @@ class Config:
         stream_debug_raw = os.getenv("GEMINI_STREAM_DEBUG", "false").strip().lower()
         stream_debug = stream_debug_raw in ("true", "1", "yes")
 
+        # Парсинг GEMINI_SKIP_TRUST
+        skip_trust_raw = os.getenv("GEMINI_SKIP_TRUST", "true").strip().lower()
+        skip_trust = skip_trust_raw in ("true", "1", "yes")
+
         # Парсинг GEMINI_WORKING_DIR
         working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
         working_dir = (
@@ -148,6 +153,7 @@ class Config:
                 "GEMINI_TARGET_VERSION", cls.gemini_target_version
             ),
             gemini_bin=os.getenv("GEMINI_BIN", cls.gemini_bin),
+            gemini_skip_trust=skip_trust,
             gemini_approval_mode=os.getenv(
                 "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
             ),
@@ -252,6 +258,7 @@ class Config:
             "gemini_model": self.gemini_model,
             "gemini_target_version": self.gemini_target_version,
             "gemini_bin": self.gemini_bin,
+            "gemini_skip_trust": self.gemini_skip_trust,
             "gemini_approval_mode": self.gemini_approval_mode,
             "gemini_working_dir": self.gemini_working_dir,
             "gemini_include_directories": self.gemini_include_directories,
@@ -296,6 +303,11 @@ class Config:
     def sandbox_flag(self) -> list[str]:
         """Аргумент --sandbox, если включён."""
         return ["--sandbox"] if self.gemini_sandbox else []
+
+    @property
+    def skip_trust_flag(self) -> list[str]:
+        """Аргумент --skip-trust для headless Gemini CLI 0.39+."""
+        return ["--skip-trust"] if self.gemini_skip_trust else []
 
     @property
     def include_directories_flag(self) -> list[str]:

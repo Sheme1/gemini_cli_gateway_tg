@@ -37,6 +37,22 @@ def classify_gemini_error(text: str, returncode: int | None = None) -> GeminiErr
         )
 
     if _contains_any(
+        lowered,
+        "untrusted workspace",
+        "untrusted folder",
+        "fataluntrustedworkspaceerror",
+        "trust workspace",
+        "folder trust",
+    ):
+        return _hint(
+            "untrusted_workspace",
+            "Gemini CLI не доверяет рабочей папке.",
+            "В headless-режиме Gemini CLI не может показать интерактивный trust-dialog.",
+            "Включите GEMINI_SKIP_TRUST=true или задайте GEMINI_CLI_TRUST_WORKSPACE=true для пользователя сервиса.",
+            normalized,
+        )
+
+    if _contains_any(
         lowered, "not authenticated", "login", "oauth", "auth failed", "credential"
     ):
         return _hint(

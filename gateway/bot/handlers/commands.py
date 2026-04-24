@@ -267,6 +267,7 @@ async def command_context_handler(
         if config.gemini_include_directories
         else "нет"
     )
+    trust_mode = "--skip-trust" if config.gemini_skip_trust else "external/env"
     active_prompt = "да" if session_manager.has_active_prompt(user_id) else "нет"
     await message.answer(
         "🧭 <b>Текущий контекст</b>\n\n"
@@ -275,6 +276,7 @@ async def command_context_handler(
         f"<b>Session:</b> <code>{html.quote(active_session)}</code>\n"
         f"<b>Working dir:</b> <code>{html.quote(config.gemini_working_dir)}</code>\n"
         f"<b>Include dirs:</b> <code>{html.quote(include_dirs)}</code>\n"
+        f"<b>Trust:</b> <code>{html.quote(trust_mode)}</code>\n"
         f"<b>Активный запрос:</b> {active_prompt}\n"
         f"<b>Prompt warn/max:</b> {config.prompt_warn_chars}/{config.prompt_max_chars} chars"
     )

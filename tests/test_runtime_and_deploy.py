@@ -42,6 +42,8 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         monkeypatch.setenv("PROMPT_CONFIRM_TIMEOUT", "33")
         monkeypatch.setenv("USER_DAILY_TOKEN_LIMIT", "1000")
         monkeypatch.setenv("GLOBAL_DAILY_TOKEN_LIMIT", "2000")
+        monkeypatch.delenv("GEMINI_TARGET_VERSION", raising=False)
+        monkeypatch.setenv("GEMINI_SKIP_TRUST", "false")
         monkeypatch.setenv("LOG_MODE", "debug")
         monkeypatch.delenv("LOG_LEVEL", raising=False)
         monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
@@ -49,6 +51,8 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         config = Config.from_env()
 
         assert config.gemini_bin == "gemini-custom"
+        assert config.gemini_target_version == "0.39.1"
+        assert config.gemini_skip_trust is False
         assert config.gemini_include_directories == (str(include_dir.resolve()),)
         assert config.include_directories_flag == [
             "--include-directories",
@@ -66,6 +70,7 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.log_mode == "debug"
         assert config.log_level == "DEBUG"
         assert config.gateway_state_dir == str((tmp_path / "state").resolve())
+        assert config.redacted_dict()["gemini_skip_trust"] is False
         assert config.redacted_dict()["telegram_bot_token"] == "1234...oken"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
@@ -171,11 +176,11 @@ async def test_doctor_warns_on_gemini_version_mismatch(monkeypatch) -> None:
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:secret-token")
         monkeypatch.setenv("GEMINI_WORKING_DIR", str(tmp_path))
         monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
-        monkeypatch.setenv("GEMINI_TARGET_VERSION", "0.38.2")
+        monkeypatch.setenv("GEMINI_TARGET_VERSION", "0.39.1")
 
         async def fake_probe(command: str, *_args, cwd=None):
             del cwd
-            version = "0.39.0" if "gemini" in command else "v22.0.0"
+            version = "0.40.0" if "gemini" in command else "v22.0.0"
             return CommandProbe(
                 command=command, path=f"/bin/{command}", version=version
             )
@@ -186,7 +191,38 @@ async def test_doctor_warns_on_gemini_version_mismatch(monkeypatch) -> None:
 
         gemini_check = next(check for check in report.checks if check.name == "gemini")
         assert gemini_check.status == "warn"
-        assert "0.38.2" in gemini_check.hint
+        assert "0.39.1" in gemini_check.hint
+        assert not report.has_errors
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_doctor_warns_when_headless_trust_is_disabled(monkeypatch) -> None:
+    tmp_path = make_test_dir()
+    try:
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:secret-token")
+        monkeypatch.setenv("GEMINI_WORKING_DIR", str(tmp_path))
+        monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("GEMINI_SKIP_TRUST", "false")
+        monkeypatch.delenv("GEMINI_CLI_TRUST_WORKSPACE", raising=False)
+
+        async def fake_probe(command: str, *_args, cwd=None):
+            del cwd
+            version = "0.39.1" if "gemini" in command else "v22.0.0"
+            return CommandProbe(
+                command=command, path=f"/bin/{command}", version=version
+            )
+
+        monkeypatch.setattr("gateway.doctor.probe_command", fake_probe)
+
+        report = await run_doctor()
+
+        trust_check = next(
+            check for check in report.checks if check.name == "headless trust"
+        )
+        assert trust_check.status == "warn"
+        assert "GEMINI_SKIP_TRUST=true" in trust_check.hint
         assert not report.has_errors
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

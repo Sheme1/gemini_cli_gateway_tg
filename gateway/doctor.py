@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from dataclasses import asdict, dataclass
 from html import escape
 from pathlib import Path
@@ -81,6 +82,7 @@ async def run_doctor() -> DoctorReport:
             )
         )
 
+    checks.append(_headless_trust_check(config))
     checks.extend(_python_import_checks())
     checks.extend(await _runtime_checks(config))
     checks.extend(_path_checks(config))
@@ -137,6 +139,32 @@ def _python_import_checks() -> list[DoctorCheck]:
             )
         )
     return checks
+
+
+def _headless_trust_check(config: Config) -> DoctorCheck:
+    env_trust = os.getenv("GEMINI_CLI_TRUST_WORKSPACE", "").strip().lower()
+    env_trust_enabled = env_trust in {"true", "1", "yes"}
+    if config.gemini_skip_trust:
+        return DoctorCheck(
+            name="headless trust",
+            status="ok",
+            details="GEMINI_SKIP_TRUST=true; prompt-запуски передают --skip-trust.",
+        )
+    if env_trust_enabled:
+        return DoctorCheck(
+            name="headless trust",
+            status="ok",
+            details="GEMINI_CLI_TRUST_WORKSPACE=true задан во внешнем окружении.",
+        )
+    return DoctorCheck(
+        name="headless trust",
+        status="warn",
+        details="GEMINI_SKIP_TRUST=false и GEMINI_CLI_TRUST_WORKSPACE не включён.",
+        hint=(
+            "Gemini CLI 0.39.1 может остановиться на trust-check в headless-режиме. "
+            "Включите GEMINI_SKIP_TRUST=true или GEMINI_CLI_TRUST_WORKSPACE=true."
+        ),
+    )
 
 
 async def _runtime_checks(config: Config) -> list[DoctorCheck]:

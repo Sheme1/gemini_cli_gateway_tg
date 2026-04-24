@@ -337,6 +337,11 @@ class SessionManager:
         return self.active_sessions.get(user_id)
 
     async def delete_session_by_id(self, session_id: str) -> bool:
+        deleted, output = await self._delete_session(session_id)
+        if deleted:
+            self._clear_active_session_refs(session_id)
+            return True
+
         sessions = await self.get_sessions_list()
         target = next(
             (session for session in sessions if session.session_id == session_id),
@@ -345,10 +350,23 @@ class SessionManager:
         if target is None:
             return False
 
+        deleted, fallback_output = await self._delete_session(str(target.source_index))
+        if not deleted:
+            combined_output = strip_ansi_codes(
+                "\n".join(part for part in (output, fallback_output) if part).strip()
+            )
+            raise RuntimeError(
+                "gemini --delete-session failed with code "
+                f"nonzero: {combined_output[:1000]}"
+            )
+        self._clear_active_session_refs(session_id)
+        return True
+
+    async def _delete_session(self, session_ref: str) -> tuple[bool, str]:
         process = await asyncio.create_subprocess_exec(
             self._gemini_executable(),
             "--delete-session",
-            str(target.source_index),
+            session_ref,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.config.gemini_working_dir,
@@ -360,14 +378,13 @@ class SessionManager:
             + stderr.decode("utf-8", errors="replace")
         )
         if process.returncode != 0:
-            raise RuntimeError(
-                "gemini --delete-session failed with code "
-                f"{process.returncode}: {strip_ansi_codes(output).strip()[:1000]}"
-            )
+            return False, output
+        return True, output
+
+    def _clear_active_session_refs(self, session_id: str) -> None:
         for user_id, active_session_id in list(self.active_sessions.items()):
             if active_session_id == session_id:
                 self.active_sessions.pop(user_id, None)
-        return True
 
     async def cancel_active_prompt(self, user_id: int, reason: str = "") -> bool:
         process = self.active_prompt_processes.get(user_id)
@@ -472,6 +489,7 @@ class SessionManager:
             "-p",
             prompt,
         ]
+        args.extend(self.config.skip_trust_flag)
         args.extend(self.config.approval_mode_flag)
         args.extend(self.config.sandbox_flag)
         args.extend(self.config.include_directories_flag)

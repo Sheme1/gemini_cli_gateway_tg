@@ -112,7 +112,8 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `TARGET_CHAT_ID` | No | Numeric chat/user id. Leave empty to allow every chat that can reach the bot. Set it for a private single-user gateway. |
 | `GEMINI_BIN` | No | Gemini executable name or absolute path. Use `gemini` when it is available through `PATH`; use `/home/user/.npm-global/bin/gemini` for systemd if needed. |
 | `GEMINI_MODEL` | No | Model passed to `gemini -m`, for example `gemini-3-flash-preview`. Faster models reduce model latency but do not remove MCP/skills. |
-| `GEMINI_TARGET_VERSION` | No | Expected Gemini CLI version for `doctor`. Defaults to `0.38.2`; mismatch is a warning, not a startup blocker. |
+| `GEMINI_TARGET_VERSION` | No | Expected Gemini CLI version for `doctor`. Defaults to `0.39.1`; mismatch is a warning, not a startup blocker. |
+| `GEMINI_SKIP_TRUST` | No | `true` by default. Passes `--skip-trust` for headless Gemini CLI 0.39.1 runs so workspace trust cannot block on an interactive prompt. |
 | `GEMINI_APPROVAL_MODE` | No | One of `default`, `auto_edit`, `yolo`, `plan`. `yolo` passes `--yolo`; the others pass `--approval-mode=...`. |
 | `GEMINI_WORKING_DIR` | No | Main project/work directory for Gemini CLI. Keep it as narrow as practical to reduce startup scanning. |
 | `GEMINI_INCLUDE_DIRECTORIES` | No | Extra directories for Gemini workspace access, comma-separated. Example: `/srv/project/shared,/srv/docs`. Passed as `--include-directories`. |
@@ -227,17 +228,18 @@ If you use Docker, remember that Gemini CLI auth lives inside the container volu
 
 This gateway currently uses a headless request model:
 
-1. each Telegram prompt launches `gemini -p ... -o stream-json`
+1. each Telegram prompt launches `gemini -p ... -o stream-json --skip-trust`
 2. Gemini returns a `session_id`
 3. the gateway stores that `session_id` per user
 4. later prompts continue the same context with `--resume`
 
 That keeps conversations continuous without depending on one forever-running subprocess.
 
-`/sessions` uses `gemini --list-sessions`, parses the Gemini CLI 0.38.2 text
+`/sessions` uses `gemini --list-sessions`, parses the Gemini CLI 0.39.1 text
 format, reverses it so the newest chats appear first, and shows five dialogs per
-Telegram page. Gemini CLI does not expose a structured JSON session list in
-0.38.2, so this parser is covered by tests.
+Telegram page. Deletion uses `gemini --delete-session <session_uuid>` first, then
+falls back to the listed index if needed. Gemini CLI does not expose a structured
+JSON session list in 0.39.1, so this parser is covered by tests.
 
 The first real answer chunk is edited into Telegram immediately. Later edits are
 coalesced by `STREAM_UPDATE_INTERVAL` and `STREAM_MIN_UPDATE_CHARS` to avoid
@@ -247,7 +249,7 @@ Model selection is stored per Telegram user in `GATEWAY_STATE_DIR`; the `.env`
 model is the fallback. Usage counters are stored in `usage.json` and contain
 only totals and last-request metadata, never prompt text.
 
-ACP (`gemini --acp`) is not the default transport. In Gemini CLI 0.38.2 it is a
+ACP (`gemini --acp`) is not the default transport. In Gemini CLI 0.39.1 it is a
 JSON-RPC/stdio mode mainly intended for IDE and editor integrations. This
 gateway keeps the safer headless `stream-json` transport so MCP, skills,
 extensions, normal Gemini CLI config, artifact delivery, and Telegram streaming

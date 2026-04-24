@@ -112,7 +112,8 @@ python -m gateway.main --doctor-json
 | `TARGET_CHAT_ID` | Нет | Числовой id чата или пользователя. Пустое значение разрешает все чаты, которые могут писать боту. Для личного шлюза лучше указать свой id. |
 | `GEMINI_BIN` | Нет | Имя или полный путь к Gemini CLI. Если `gemini` есть в `PATH`, оставьте `gemini`; для systemd можно указать полный путь вроде `/home/user/.npm-global/bin/gemini`. |
 | `GEMINI_MODEL` | Нет | Модель для `gemini -m`, например `gemini-3-flash-preview`. Более быстрая модель уменьшает задержку модели, но не отключает MCP/skills. |
-| `GEMINI_TARGET_VERSION` | Нет | Ожидаемая версия Gemini CLI для `doctor`. По умолчанию `0.38.2`; несовпадение даёт warning, но не блокирует запуск. |
+| `GEMINI_TARGET_VERSION` | Нет | Ожидаемая версия Gemini CLI для `doctor`. По умолчанию `0.39.1`; несовпадение даёт warning, но не блокирует запуск. |
+| `GEMINI_SKIP_TRUST` | Нет | По умолчанию `true`. Передаёт `--skip-trust` при headless-запусках Gemini CLI 0.39.1, чтобы trust-check не ждал интерактивный prompt. |
 | `GEMINI_APPROVAL_MODE` | Нет | `default`, `auto_edit`, `yolo` или `plan`. Для `yolo` передаётся `--yolo`, для остальных `--approval-mode=...`. |
 | `GEMINI_WORKING_DIR` | Нет | Основная рабочая папка Gemini CLI. Лучше держать её достаточно узкой, чтобы CLI меньше сканировал при старте. |
 | `GEMINI_INCLUDE_DIRECTORIES` | Нет | Дополнительные папки workspace через запятую, например `/srv/project/shared,/srv/docs`. Передаются как `--include-directories`. |
@@ -227,7 +228,7 @@ docker compose logs -f gateway
 
 Сейчас шлюз работает по headless-модели:
 
-1. каждый Telegram-запрос запускает `gemini -p ... -o stream-json`
+1. каждый Telegram-запрос запускает `gemini -p ... -o stream-json --skip-trust`
 2. Gemini возвращает `session_id`
 3. шлюз сохраняет этот `session_id` отдельно для пользователя
 4. следующие сообщения продолжают тот же контекст через `--resume`
@@ -235,9 +236,11 @@ docker compose logs -f gateway
 Это позволяет держать непрерывный диалог без одного постоянно живущего процесса Gemini CLI.
 
 `/sessions` использует `gemini --list-sessions`, разбирает текстовый формат
-Gemini CLI 0.38.2, разворачивает порядок так, чтобы новые диалоги были сверху,
-и показывает по пять диалогов на страницу. В Gemini CLI 0.38.2 нет отдельного
-JSON-вывода для списка сессий, поэтому парсер покрыт тестами.
+Gemini CLI 0.39.1, разворачивает порядок так, чтобы новые диалоги были сверху,
+и показывает по пять диалогов на страницу. Удаление сначала использует
+`gemini --delete-session <session_uuid>`, затем fallback на index из списка, если
+нужно. В Gemini CLI 0.39.1 нет отдельного JSON-вывода для списка сессий, поэтому
+парсер покрыт тестами.
 
 Первый настоящий чанк ответа сразу редактирует сообщение в Telegram. Следующие
 обновления объединяются через `STREAM_UPDATE_INTERVAL` и
@@ -248,7 +251,7 @@ JSON-вывода для списка сессий, поэтому парсер 
 `usage.json` и содержат только totals и metadata последнего запроса, без текста
 пользовательских запросов.
 
-ACP (`gemini --acp`) не включён как основной транспорт. В Gemini CLI 0.38.2 это
+ACP (`gemini --acp`) не включён как основной транспорт. В Gemini CLI 0.39.1 это
 JSON-RPC/stdio режим в первую очередь для IDE/editor integrations. Шлюз остаётся
 на headless `stream-json`, потому что так сохраняется совместимость с MCP,
 skills, extensions, обычной конфигурацией Gemini CLI, отправкой артефактов и
