@@ -33,7 +33,7 @@ async def command_start_handler(
         f"Отправьте любое сообщение, чтобы начать диалог.\n\n"
         f"Команды:\n"
         f"🔄 /new — начать новый диалог (очистить контекст)\n"
-        f"📂 /sessions — список прошлых диалогов\n"
+        f"📂 /sessions [фильтр|latest] — список прошлых диалогов\n"
         f"⏹ /cancel — остановить текущий запрос\n"
         f"⚙️ /settings — настройки отображения и режима работы\n"
         f"🧭 /context — текущая модель и контекст\n"
@@ -63,6 +63,8 @@ async def command_sessions_handler(
     message: Message, session_manager: SessionManager
 ) -> None:
     """Обработчик команды /sessions."""
+    args = message.text.split(maxsplit=1) if message.text else ["/sessions"]
+    query = args[1].strip() if len(args) > 1 else ""
     status_message = await message.answer(
         "⏳ <i>Запрашиваю список диалогов...</i>", parse_mode="HTML"
     )
@@ -72,7 +74,37 @@ async def command_sessions_handler(
             await status_message.edit_text("📂 Сохранённые диалоги не найдены.")
             return
 
+        if query.lower() == "latest":
+            await session_manager.set_active_session(
+                message.from_user.id,
+                "latest",
+            )
+            await status_message.edit_text(
+                "✅ <b>Диалог latest выбран.</b>\n"
+                "Gemini CLI сам откроет самый свежий сохранённый диалог "
+                "через <code>--resume latest</code>."
+            )
+            return
+
+        if query:
+            lowered_query = query.lower()
+            sessions = [
+                session
+                for session in sessions
+                if lowered_query in session.title.lower()
+                or lowered_query in session.session_id.lower()
+                or lowered_query == str(session.source_index)
+            ]
+            if not sessions:
+                await status_message.edit_text(
+                    "📂 По фильтру ничего не найдено.\n"
+                    f"Фильтр: <code>{html.quote(query)}</code>"
+                )
+                return
+
         text, reply_markup = build_sessions_page(sessions)
+        if query:
+            text = f"🔎 Фильтр: <code>{html.quote(query)}</code>\n\n{text}"
         await status_message.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
         await status_message.edit_text(
@@ -116,6 +148,8 @@ async def command_mcp_handler(
 
         text += (
             "\n💡 Включайте и выключайте их кнопками ниже.\n"
+            "Reload в интерактивном CLI недоступен как headless subcommand; "
+            "кнопка перечитывает список.\n"
             "Чтобы задействовать MCP в запросе, напишите: "
             "<code>/mcp имя_сервера запрос</code>\n"
             "Или просто упомяните <code>@имя_сервера</code> в сообщении."
@@ -181,6 +215,8 @@ async def command_skills_handler(
 
         text += (
             "\n💡 Включайте и выключайте навыки кнопками ниже.\n"
+            "Reload в интерактивном CLI недоступен как headless subcommand; "
+            "кнопка перечитывает список.\n"
             "Чтобы принудительно запустить навык, напишите: "
             "<code>/skills имя_навыка запрос</code>"
         )
@@ -255,6 +291,7 @@ async def command_context_handler(
     session_manager: SessionManager,
     config: Config,
     user_settings: UserSettingsStore,
+    runtime_state: GatewayRuntimeState,
 ) -> None:
     """Показывает текущий контекст пользователя."""
     user_id = message.from_user.id
@@ -268,15 +305,44 @@ async def command_context_handler(
         else "нет"
     )
     trust_mode = "--skip-trust" if config.gemini_skip_trust else "external/env"
+    policy_paths = (
+        ", ".join(config.gemini_policy_paths) if config.gemini_policy_paths else "нет"
+    )
+    admin_policy_paths = (
+        ", ".join(config.gemini_admin_policy_paths)
+        if config.gemini_admin_policy_paths
+        else "нет"
+    )
+    extensions = (
+        ", ".join(config.gemini_extensions) if config.gemini_extensions else "все"
+    )
+    mcp_allowlist = (
+        ", ".join(config.gemini_allowed_mcp_server_names)
+        if config.gemini_allowed_mcp_server_names
+        else "нет"
+    )
+    current_gemini = (
+        runtime_state.gemini_probe.version
+        if runtime_state.gemini_probe
+        else "не проверено"
+    )
     active_prompt = "да" if session_manager.has_active_prompt(user_id) else "нет"
     await message.answer(
         "🧭 <b>Текущий контекст</b>\n\n"
         f"<b>Модель:</b> <code>{html.quote(model)}</code>\n"
         f"<b>Пресет:</b> {html.quote(preset_label)}\n"
+        f"<b>Gemini CLI:</b> <code>{html.quote(current_gemini)}</code> "
+        f"(target <code>{html.quote(config.gemini_target_version)}</code>)\n"
         f"<b>Session:</b> <code>{html.quote(active_session)}</code>\n"
         f"<b>Working dir:</b> <code>{html.quote(config.gemini_working_dir)}</code>\n"
         f"<b>Include dirs:</b> <code>{html.quote(include_dirs)}</code>\n"
+        f"<b>Approval:</b> <code>{html.quote(config.gemini_approval_mode)}</code>\n"
         f"<b>Trust:</b> <code>{html.quote(trust_mode)}</code>\n"
+        f"<b>Policy:</b> <code>{html.quote(policy_paths)}</code>\n"
+        f"<b>Admin policy:</b> <code>{html.quote(admin_policy_paths)}</code>\n"
+        f"<b>Extensions:</b> <code>{html.quote(extensions)}</code>\n"
+        f"<b>MCP allowlist:</b> <code>{html.quote(mcp_allowlist)}</code>\n"
+        f"<b>Screen reader:</b> {'да' if config.gemini_screen_reader else 'нет'}\n"
         f"<b>Активный запрос:</b> {active_prompt}\n"
         f"<b>Prompt warn/max:</b> {config.prompt_warn_chars}/{config.prompt_max_chars} chars"
     )
@@ -302,16 +368,20 @@ async def command_usage_handler(
         if not last_request
         else (
             f"{last_request.get('total_tokens', 0)} tokens, "
+            f"thinking={last_request.get('thoughts_tokens', 0)}, "
             f"{last_request.get('duration_ms', 0)}ms, "
-            f"{last_request.get('model', 'unknown')}"
+            f"{last_request.get('model', 'unknown')}, "
+            f"status={last_request.get('result_status') or 'unknown'}"
         )
     )
+    stats_line = _format_last_stats(last_request.get("stats") if last_request else None)
     await message.answer(
         "📊 <b>Usage за сегодня</b>\n\n"
         f"<b>Дата:</b> {snapshot.date}\n"
         f"<b>Вы:</b> {user_limit}\n"
         f"<b>Всего:</b> {global_limit}\n"
         f"<b>Последний запрос:</b> <code>{html.quote(last_line)}</code>"
+        f"{stats_line}"
     )
 
 
@@ -377,7 +447,7 @@ async def command_help_handler(message: Message) -> None:
         "Контекст переписки сохраняется автоматически.\n\n"
         "<b>Доступные команды:</b>\n"
         "/new — очистить историю и начать новый диалог\n"
-        "/sessions — открыть один из прошлых диалогов\n"
+        "/sessions [фильтр|latest] — открыть один из прошлых диалогов\n"
         "/mcp — просмотреть MCP-серверы\n"
         "/skills — просмотреть навыки\n"
         "/cancel — остановить текущий запрос\n"
@@ -396,3 +466,45 @@ def _format_limit(used: int, limit: int) -> str:
     if limit <= 0:
         return f"{used} tokens (лимит выключен)"
     return f"{used}/{limit} tokens"
+
+
+def _format_last_stats(stats) -> str:
+    if not isinstance(stats, dict):
+        return ""
+    candidates = []
+    for key in ("models", "per_model", "perModel", "model_usage", "modelUsage"):
+        value = stats.get(key)
+        if isinstance(value, dict):
+            candidates.extend(
+                f"{name}: {_format_model_stats(payload)}"
+                for name, payload in value.items()
+                if isinstance(payload, dict)
+            )
+        elif isinstance(value, list):
+            for payload in value:
+                if not isinstance(payload, dict):
+                    continue
+                name = payload.get("model") or payload.get("name") or "model"
+                candidates.append(f"{name}: {_format_model_stats(payload)}")
+    if not candidates:
+        return ""
+    return (
+        "\n<b>По моделям:</b> <code>"
+        + html.quote(", ".join(candidates[:5]))
+        + "</code>"
+    )
+
+
+def _format_model_stats(payload: dict) -> str:
+    parts = []
+    token_keys = (
+        ("total", "total_tokens", "totalTokens"),
+        ("in", "input_tokens", "inputTokens"),
+        ("out", "output_tokens", "outputTokens"),
+        ("think", "thoughts_tokens", "thoughtsTokens"),
+    )
+    for label, snake_key, camel_key in token_keys:
+        value = payload.get(snake_key, payload.get(camel_key))
+        if value is not None:
+            parts.append(f"{label}={value}")
+    return "/".join(parts) if parts else "?"

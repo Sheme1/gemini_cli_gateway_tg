@@ -37,6 +37,9 @@ class PromptLatencySnapshot:
     first_text_ms: int | None = None
     total_ms: int | None = None
     returncode: int | None = None
+    result_status: str = ""
+    total_tokens: int = 0
+    thoughts_tokens: int = 0
 
 
 @dataclass
@@ -296,6 +299,12 @@ def _latency_line(snapshot: PromptLatencySnapshot | None) -> str:
         f"total={_format_ms(snapshot.total_ms)}",
         f"rc={snapshot.returncode}",
     ]
+    if snapshot.result_status:
+        parts.append(f"status={snapshot.result_status}")
+    if snapshot.total_tokens:
+        parts.append(f"tokens={snapshot.total_tokens}")
+    if snapshot.thoughts_tokens:
+        parts.append(f"thoughts={snapshot.thoughts_tokens}")
     age = int(time.time() - snapshot.started_at)
     parts.append(f"{age}s ago")
     return ", ".join(parts)

@@ -25,6 +25,24 @@ def classify_gemini_error(text: str, returncode: int | None = None) -> GeminiErr
     normalized = " ".join(text.split())
     lowered = normalized.lower()
 
+    if returncode == 42 or _contains_any(lowered, "input error", "invalid prompt"):
+        return _hint(
+            "input_error",
+            "Gemini CLI отклонил входные параметры.",
+            "Запрос или аргументы запуска оказались некорректными для headless-режима.",
+            "Проверьте длину запроса, модель, session_id и дополнительные CLI-флаги.",
+            normalized,
+        )
+
+    if returncode == 53 or _contains_any(lowered, "turn limit exceeded"):
+        return _hint(
+            "turn_limit",
+            "Достигнут лимит ходов Gemini CLI.",
+            "Текущая сохранённая сессия стала слишком длинной для продолжения.",
+            "Запустите /new или выберите более ранний/другой диалог через /sessions.",
+            normalized,
+        )
+
     if _contains_any(
         lowered, "enoent", "not found", "is not recognized", "no such file"
     ):
@@ -53,7 +71,14 @@ def classify_gemini_error(text: str, returncode: int | None = None) -> GeminiErr
         )
 
     if _contains_any(
-        lowered, "not authenticated", "login", "oauth", "auth failed", "credential"
+        lowered,
+        "not authenticated",
+        "login",
+        "oauth",
+        "auth failed",
+        "credential",
+        "keychain",
+        "keytar",
     ):
         return _hint(
             "auth",
@@ -63,12 +88,32 @@ def classify_gemini_error(text: str, returncode: int | None = None) -> GeminiErr
             normalized,
         )
 
+    if _contains_any(lowered, "policy") and _contains_any(
+        lowered, "deny", "denied", "blocked", "disallowed"
+    ):
+        return _hint(
+            "policy_denied",
+            "Действие заблокировано policy rules.",
+            "Gemini CLI получил запрет от Policy Engine.",
+            "Проверьте пользовательские или admin policy TOML-файлы и текущий approval mode.",
+            normalized,
+        )
+
     if _contains_any(lowered, "quota", "rate limit", "resource exhausted", "429"):
         return _hint(
             "quota",
             "Gemini временно отклонил запрос.",
             "Похоже на лимит квоты или rate limit.",
             "Повторите позже, смените модель на более дешёвую или проверьте лимиты аккаунта.",
+            normalized,
+        )
+
+    if _contains_any(lowered, "overloaded", "capacity", "fallback model"):
+        return _hint(
+            "model_capacity",
+            "Модель Gemini временно недоступна.",
+            "Выбранная модель перегружена или требует fallback-маршрутизации.",
+            "Попробуйте модельный пресет auto/flash или повторите запрос позже.",
             normalized,
         )
 

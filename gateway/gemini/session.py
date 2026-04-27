@@ -131,6 +131,25 @@ def _build_empty_stream_warning(stderr_text: str) -> str:
     )
 
 
+def _build_headless_approval_warning(request: dict) -> str:
+    tool_name = (
+        request.get("tool")
+        or request.get("name")
+        or request.get("action")
+        or request.get("tool_name")
+        or "неизвестное действие"
+    )
+    return (
+        "Gemini CLI запросил интерактивное подтверждение действия, "
+        "но gateway запускает CLI в headless stream-json режиме.\n\n"
+        f"Действие: {tool_name}\n\n"
+        "В Gemini CLI 0.39.1 такие подтверждения в non-interactive режиме "
+        "не могут быть безопасно продолжены из Telegram. Используйте "
+        "GEMINI_APPROVAL_MODE=auto_edit/yolo или настройте policy rules через "
+        "GEMINI_POLICY_PATHS / GEMINI_ADMIN_POLICY_PATHS."
+    )
+
+
 def _elapsed_ms(start: float, end: float) -> int:
     return max(0, int((end - start) * 1000))
 
@@ -493,6 +512,11 @@ class SessionManager:
         args.extend(self.config.approval_mode_flag)
         args.extend(self.config.sandbox_flag)
         args.extend(self.config.include_directories_flag)
+        args.extend(self.config.policy_flags)
+        args.extend(self.config.admin_policy_flags)
+        args.extend(self.config.allowed_mcp_server_names_flag)
+        args.extend(self.config.extensions_flag)
+        args.extend(self.config.screen_reader_flag)
 
         session_id = self.active_sessions.get(user_id)
         if session_id:
@@ -550,6 +574,9 @@ class SessionManager:
         approval_requested = False
         logged_tool_before_text = False
         assistant_snapshot = ""
+        result_status = ""
+        result_total_tokens = 0
+        result_thoughts_tokens = 0
         log_stream = logger.info if self.config.gemini_stream_debug else logger.debug
 
         async def read_stderr() -> None:
@@ -700,6 +727,11 @@ class SessionManager:
                     )
                     logged_tool_before_text = True
 
+                if event.event_type == "result_stats":
+                    result_status = event.result_status
+                    result_total_tokens = event.total_tokens
+                    result_thoughts_tokens = event.thoughts_tokens
+
                 # Захват session_id из init-события
                 if event.session_id and not session_id:
                     self.active_sessions[user_id] = event.session_id
@@ -738,7 +770,15 @@ class SessionManager:
 
                 if event.approval_request:
                     approval_requested = True
-                    await on_approval(event.approval_request)
+                    emitted_terminal_warning = True
+                    await on_event(
+                        StreamEvent(
+                            event_type="warning",
+                            warning_message=_build_headless_approval_warning(
+                                event.approval_request
+                            ),
+                        )
+                    )
                     break
 
                 if event.is_done:
@@ -820,6 +860,9 @@ class SessionManager:
                         first_text_ms=first_text_ms,
                         total_ms=total_ms,
                         returncode=process.returncode,
+                        result_status=result_status,
+                        total_tokens=result_total_tokens,
+                        thoughts_tokens=result_thoughts_tokens,
                     )
                 )
 

@@ -32,6 +32,15 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         include_dir = tmp_path / "include"
         include_dir.mkdir()
         monkeypatch.setenv("GEMINI_INCLUDE_DIRECTORIES", str(include_dir))
+        policy_file = tmp_path / "policy.toml"
+        admin_policy_file = tmp_path / "admin-policy.toml"
+        policy_file.write_text("[[rule]]\n", encoding="utf-8")
+        admin_policy_file.write_text("[[rule]]\n", encoding="utf-8")
+        monkeypatch.setenv("GEMINI_POLICY_PATHS", str(policy_file))
+        monkeypatch.setenv("GEMINI_ADMIN_POLICY_PATHS", str(admin_policy_file))
+        monkeypatch.setenv("GEMINI_ALLOWED_MCP_SERVER_NAMES", "github,context7")
+        monkeypatch.setenv("GEMINI_EXTENSIONS", "none")
+        monkeypatch.setenv("GEMINI_SCREEN_READER", "true")
         monkeypatch.setenv("GEMINI_BIN", "gemini-custom")
         monkeypatch.setenv("POLLING_TIMEOUT", "11")
         monkeypatch.setenv("POLLING_CONCURRENCY_LIMIT", "7")
@@ -54,10 +63,25 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.gemini_target_version == "0.39.1"
         assert config.gemini_skip_trust is False
         assert config.gemini_include_directories == (str(include_dir.resolve()),)
+        assert config.gemini_policy_paths == (str(policy_file),)
+        assert config.gemini_admin_policy_paths == (str(admin_policy_file),)
+        assert config.gemini_allowed_mcp_server_names == ("github", "context7")
+        assert config.gemini_extensions == ("none",)
+        assert config.gemini_screen_reader is True
         assert config.include_directories_flag == [
             "--include-directories",
             str(include_dir.resolve()),
         ]
+        assert config.policy_flags == ["--policy", str(policy_file)]
+        assert config.admin_policy_flags == ["--admin-policy", str(admin_policy_file)]
+        assert config.allowed_mcp_server_names_flag == [
+            "--allowed-mcp-server-names",
+            "github",
+            "--allowed-mcp-server-names",
+            "context7",
+        ]
+        assert config.extensions_flag == ["--extensions", "none"]
+        assert config.screen_reader_flag == ["--screen-reader"]
         assert config.polling_timeout == 11
         assert config.polling_concurrency_limit == 7
         assert config.stream_min_update_chars == 88

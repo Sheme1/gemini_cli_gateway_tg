@@ -65,9 +65,9 @@ class StreamEditor:
     async def _loading_animation(self, chat_id: int, message_id: int) -> None:
         stages = [
             "⏳ [1/4] Инициализация Gemini CLI...",
-            "🔐 [2/4] Подключение к хранилищу ключей...",
-            "🔌 [3/4] Прогрев MCP-серверов...",
-            "🧠 [4/4] Ожидание ответа модели...",
+            "🔐 [2/4] Проверка auth/trust/policy...",
+            "🔌 [3/4] Загрузка MCP, skills и extensions...",
+            "🧠 [4/4] Ожидание stream-json событий...",
         ]
         times = [0, 2, 5, 9]
 

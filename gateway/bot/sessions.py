@@ -23,10 +23,19 @@ def build_sessions_page(
     text_lines = [
         "📂 <b>Доступные диалоги</b>",
         f"Страница {safe_page + 1}/{total_pages}. Новые сверху.",
+        "Gemini CLI обычно чистит историю старше 30 дней, если настройки не изменены.",
         "",
     ]
 
     builder = InlineKeyboardBuilder()
+    if safe_page == 0 and sessions:
+        builder.row(
+            InlineKeyboardButton(
+                text="Открыть latest",
+                callback_data="session:open-latest",
+            )
+        )
+
     for offset, session in enumerate(page_sessions, start=1):
         display_index = start + offset
         current = " · текущий" if session.is_current else ""
@@ -34,7 +43,9 @@ def build_sessions_page(
             [
                 f"{display_index}. <b>{escape(_clip(session.title, 80))}</b>",
                 f"   обновлён: {escape(session.relative_time)}{current}",
+                f"   index: <code>{session.source_index}</code>",
                 f"   id: <code>{escape(session.short_id)}</code>",
+                f"   uuid: <code>{escape(session.session_id)}</code>",
                 "",
             ]
         )

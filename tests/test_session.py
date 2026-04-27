@@ -235,6 +235,52 @@ async def test_session_manager_emits_stderr_on_nonzero_exit(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_session_manager_warns_on_headless_approval_request(monkeypatch) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "approval_request",
+                "tool": "run_shell_command",
+            }
+        ),
+    ]
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return _FakeProcess(lines)
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+    )
+    manager = SessionManager(config)
+    events = []
+    approval_calls = []
+
+    async def on_event(event):
+        events.append(event)
+
+    async def on_approval(req):
+        approval_calls.append(req)
+
+    await manager.send_prompt(
+        prompt="test",
+        user_id=123,
+        on_event=on_event,
+        on_approval=on_approval,
+    )
+
+    assert approval_calls == []
+    assert events[-1].event_type == "warning"
+    assert "headless" in events[-1].warning_message
+
+
+@pytest.mark.asyncio
 async def test_session_manager_deduplicates_full_message_snapshots(monkeypatch) -> None:
     lines = [
         json.dumps({"type": "message", "role": "assistant", "content": "Привет"}),
@@ -309,6 +355,11 @@ async def test_session_manager_passes_include_directories(monkeypatch) -> None:
         gemini_working_dir=".",
         gemini_artifact_roots=(".",),
         gemini_include_directories=("/repo/shared", "/repo/docs"),
+        gemini_policy_paths=("/repo/policies/user.toml",),
+        gemini_admin_policy_paths=("/repo/policies/admin.toml",),
+        gemini_allowed_mcp_server_names=("github", "context7"),
+        gemini_extensions=("none",),
+        gemini_screen_reader=True,
     )
     manager = SessionManager(config)
 
@@ -328,10 +379,26 @@ async def test_session_manager_passes_include_directories(monkeypatch) -> None:
 
     assert captured_args[captured_args.index("-m") + 1] == "gemini-2.5-flash"
     assert "--skip-trust" in captured_args
+    assert "--yolo" not in captured_args
+    assert "--approval-mode=yolo" in captured_args
     assert "--include-directories" in captured_args
     assert captured_args[captured_args.index("--include-directories") + 1] == (
         "/repo/shared,/repo/docs"
     )
+    assert captured_args[captured_args.index("--policy") + 1] == (
+        "/repo/policies/user.toml"
+    )
+    assert captured_args[captured_args.index("--admin-policy") + 1] == (
+        "/repo/policies/admin.toml"
+    )
+    allowlist_index = captured_args.index("--allowed-mcp-server-names")
+    assert captured_args[allowlist_index + 1 : allowlist_index + 4] == [
+        "github",
+        "--allowed-mcp-server-names",
+        "context7",
+    ]
+    assert captured_args[captured_args.index("--extensions") + 1] == "none"
+    assert "--screen-reader" in captured_args
 
 
 @pytest.mark.asyncio

@@ -172,6 +172,9 @@ async def process_gemini_prompt(
                     model=effective_model,
                     total_tokens=event.total_tokens,
                     duration_ms=event.duration_ms,
+                    thoughts_tokens=event.thoughts_tokens,
+                    result_status=event.result_status,
+                    stats=event.stats,
                 )
         artifact_manager.register_event(event)
         rendered = render_event(event, render_mode)
@@ -197,22 +200,28 @@ async def process_gemini_prompt(
         await bot.send_message(
             chat_id=chat_id,
             text=(
-                "⚠️ Gemini запрашивает подтверждение действия.\n"
+                "⚠️ Gemini запрашивает подтверждение действия, но gateway работает "
+                "через headless stream-json.\n"
                 f"Действие: {tool_name}\n\n"
-                "Что делать?"
+                "Продолжить такой tool-call из Telegram нельзя. Используйте "
+                "GEMINI_APPROVAL_MODE=auto_edit/yolo или настройте policy rules."
             ),
-            reply_markup=inline.get_interactive_approval_keyboard(),
         )
 
     async def watch_artifacts_and_soft_finalize(prompt_task) -> None:
         nonlocal soft_finalized
         try:
             while not prompt_task.done():
-                await artifact_manager.send_ready_artifacts(
+                sent_paths = await artifact_manager.send_ready_artifacts(
                     bot=bot,
                     chat_id=chat_id,
                     started_at=started_at,
                 )
+                if sent_paths:
+                    await streamer.set_status(
+                        "📎 Артефакт найден: "
+                        + ", ".join(path.name for path in sent_paths[:3])
+                    )
 
                 idle_seconds = time.monotonic() - last_event_at
                 if (

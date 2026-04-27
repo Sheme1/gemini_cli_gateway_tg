@@ -15,29 +15,53 @@ class ModelPreset:
 
 
 MODEL_PRESETS: dict[str, ModelPreset] = {
+    "auto": ModelPreset(
+        key="auto",
+        label="Auto",
+        model="auto",
+        description="Рекомендуемый роутинг Gemini CLI: CLI сам выбирает подходящую модель.",
+    ),
+    "pro": ModelPreset(
+        key="pro",
+        label="Pro",
+        model="pro",
+        description="Алиас Gemini CLI для сложных задач и сильного reasoning.",
+    ),
+    "flash": ModelPreset(
+        key="flash",
+        label="Flash",
+        model="flash",
+        description="Алиас Gemini CLI для быстрых повседневных задач.",
+    ),
+    "flash_lite": ModelPreset(
+        key="flash_lite",
+        label="Flash Lite",
+        model="flash-lite",
+        description="Алиас Gemini CLI для самых быстрых простых запросов.",
+    ),
     "cheap": ModelPreset(
         key="cheap",
-        label="Cheap",
+        label="Legacy дешёвый",
         model="gemini-3.1-flash-lite-preview",
-        description="Минимальная стоимость и быстрые короткие ответы.",
+        description="Ручная конкретная модель: preview Flash Lite.",
     ),
     "fast": ModelPreset(
         key="fast",
-        label="Fast",
+        label="Legacy быстрый",
         model="gemini-2.5-flash",
-        description="Быстрые повседневные запросы.",
+        description="Ручная конкретная модель: Gemini 2.5 Flash.",
     ),
     "balanced": ModelPreset(
         key="balanced",
-        label="Balanced",
+        label="Legacy баланс",
         model="gemini-3-flash-preview",
-        description="Баланс скорости и качества для основной работы.",
+        description="Ручная конкретная модель: Gemini 3 Flash Preview.",
     ),
     "quality": ModelPreset(
         key="quality",
-        label="Quality",
+        label="Legacy качество",
         model="gemini-3.1-pro-preview",
-        description="Более сильная модель для сложных задач.",
+        description="Ручная конкретная модель: Gemini 3.1 Pro Preview.",
     ),
 }
 

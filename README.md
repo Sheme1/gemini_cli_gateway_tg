@@ -38,7 +38,7 @@ Gemini CLI is great in the terminal, but sometimes you want that same workflow f
 - Three output modes: `compact`, `summary`, `detailed`
 - MCP list and toggle UI
 - Skills list and toggle UI
-- Per-user model presets: `cheap`, `fast`, `balanced`, `quality`
+- Per-user model presets: `auto`, `pro`, `flash`, `flash-lite`, plus legacy manual presets
 - Oversized prompt confirmation and daily token usage tracking
 - Voice message transcription through Gemini API
 - Automatic artifact discovery and file delivery
@@ -111,10 +111,15 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `TELEGRAM_BOT_TOKEN` | Yes | Telegram Bot API token from BotFather, for example `123456789:AA...`. It is redacted in logs. |
 | `TARGET_CHAT_ID` | No | Numeric chat/user id. Leave empty to allow every chat that can reach the bot. Set it for a private single-user gateway. |
 | `GEMINI_BIN` | No | Gemini executable name or absolute path. Use `gemini` when it is available through `PATH`; use `/home/user/.npm-global/bin/gemini` for systemd if needed. |
-| `GEMINI_MODEL` | No | Model passed to `gemini -m`, for example `gemini-3-flash-preview`. Faster models reduce model latency but do not remove MCP/skills. |
+| `GEMINI_MODEL` | No | Model or Gemini CLI alias passed to `gemini -m`, for example `auto`, `pro`, `flash`, `flash-lite`, or a concrete model id. Defaults to `auto`. |
 | `GEMINI_TARGET_VERSION` | No | Expected Gemini CLI version for `doctor`. Defaults to `0.39.1`; mismatch is a warning, not a startup blocker. |
 | `GEMINI_SKIP_TRUST` | No | `true` by default. Passes `--skip-trust` for headless Gemini CLI 0.39.1 runs so workspace trust cannot block on an interactive prompt. |
-| `GEMINI_APPROVAL_MODE` | No | One of `default`, `auto_edit`, `yolo`, `plan`. `yolo` passes `--yolo`; the others pass `--approval-mode=...`. |
+| `GEMINI_APPROVAL_MODE` | No | One of `default`, `auto_edit`, `yolo`, `plan`. Passed as `--approval-mode=...`; `--yolo` is deprecated in Gemini CLI 0.39.1 and is not used. |
+| `GEMINI_POLICY_PATHS` | No | Extra user policy TOML files or directories, comma-separated. Passed as repeated `--policy` flags. |
+| `GEMINI_ADMIN_POLICY_PATHS` | No | Extra admin policy TOML files or directories, comma-separated. Passed as repeated `--admin-policy` flags. |
+| `GEMINI_ALLOWED_MCP_SERVER_NAMES` | No | Optional MCP server allowlist, comma-separated. Passed as repeated `--allowed-mcp-server-names` flags. |
+| `GEMINI_EXTENSIONS` | No | Optional extension selection, comma-separated. Use `none` to disable extensions for gateway runs. Passed as repeated `--extensions`. |
+| `GEMINI_SCREEN_READER` | No | `true` or `false`. Passes `--screen-reader` for accessibility-friendly CLI output. |
 | `GEMINI_WORKING_DIR` | No | Main project/work directory for Gemini CLI. Keep it as narrow as practical to reduce startup scanning. |
 | `GEMINI_INCLUDE_DIRECTORIES` | No | Extra directories for Gemini workspace access, comma-separated. Example: `/srv/project/shared,/srv/docs`. Passed as `--include-directories`. |
 | `GEMINI_ARTIFACT_ROOTS` | No | Directories where generated files are searched, comma-separated. Defaults to `GEMINI_WORKING_DIR`. |
@@ -211,7 +216,7 @@ If you use Docker, remember that Gemini CLI auth lives inside the container volu
 | --- | --- |
 | `/start` | Reset the current user session and show the intro message |
 | `/new` | Start a fresh Gemini conversation |
-| `/sessions` | Page through saved Gemini sessions, resume, delete, or export the list as TXT |
+| `/sessions [filter\|latest]` | Page through saved Gemini sessions, search by title/id/index, resume latest, delete, or export the list as TXT |
 | `/mcp` | Show installed MCP servers |
 | `/skills` | Show installed Gemini skills |
 | `/model` | Pick the active Gemini model |
@@ -228,7 +233,7 @@ If you use Docker, remember that Gemini CLI auth lives inside the container volu
 
 This gateway currently uses a headless request model:
 
-1. each Telegram prompt launches `gemini -p ... -o stream-json --skip-trust`
+1. each Telegram prompt launches `gemini -p ... -o stream-json --skip-trust --approval-mode=...`
 2. Gemini returns a `session_id`
 3. the gateway stores that `session_id` per user
 4. later prompts continue the same context with `--resume`
@@ -246,8 +251,10 @@ coalesced by `STREAM_UPDATE_INTERVAL` and `STREAM_MIN_UPDATE_CHARS` to avoid
 Telegram flood limits.
 
 Model selection is stored per Telegram user in `GATEWAY_STATE_DIR`; the `.env`
-model is the fallback. Usage counters are stored in `usage.json` and contain
-only totals and last-request metadata, never prompt text.
+model is the fallback. The preferred presets use Gemini CLI aliases (`auto`,
+`pro`, `flash`, `flash-lite`) so CLI-side model routing can keep working. Usage
+counters are stored in `usage.json` and contain only totals, result status,
+stats metadata, and last-request metadata, never prompt text.
 
 ACP (`gemini --acp`) is not the default transport. In Gemini CLI 0.39.1 it is a
 JSON-RPC/stdio mode mainly intended for IDE and editor integrations. This
@@ -259,7 +266,7 @@ stay compatible.
 
 This is where the MVP still feels like an MVP:
 
-- interactive approval flow is only partially implemented in headless mode
+- interactive approval is not continued from Telegram in headless mode; use approval mode or policy rules
 - Gemini CLI output formats can change between releases
 - Linux + `systemd` is the main target; other deployment modes may need local tweaks
 - some users will prefer keeping a fork for their own workflow, auth model, or deployment setup

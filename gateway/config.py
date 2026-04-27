@@ -21,13 +21,18 @@ class Config:
     target_chat_id: Optional[int] = None
 
     # === Gemini CLI ===
-    gemini_model: str = "gemini-3-flash-preview"
+    gemini_model: str = "auto"
     gemini_target_version: str = "0.39.1"
     gemini_bin: str = "gemini"
     gemini_skip_trust: bool = True
     gemini_approval_mode: str = "yolo"  # default / auto_edit / yolo / plan
     gemini_working_dir: str = field(default_factory=lambda: str(Path.home()))
     gemini_include_directories: tuple[str, ...] = field(default_factory=tuple)
+    gemini_policy_paths: tuple[str, ...] = field(default_factory=tuple)
+    gemini_admin_policy_paths: tuple[str, ...] = field(default_factory=tuple)
+    gemini_allowed_mcp_server_names: tuple[str, ...] = field(default_factory=tuple)
+    gemini_extensions: tuple[str, ...] = field(default_factory=tuple)
+    gemini_screen_reader: bool = False
     gemini_artifact_roots: tuple[str, ...] = field(default_factory=tuple)
     gemini_cli_timeout: int = 600  # секунды
     gemini_shutdown_grace_seconds: float = 5.0
@@ -107,6 +112,10 @@ class Config:
         skip_trust_raw = os.getenv("GEMINI_SKIP_TRUST", "true").strip().lower()
         skip_trust = skip_trust_raw in ("true", "1", "yes")
 
+        # Парсинг GEMINI_SCREEN_READER
+        screen_reader_raw = os.getenv("GEMINI_SCREEN_READER", "false").strip().lower()
+        screen_reader = screen_reader_raw in ("true", "1", "yes")
+
         # Парсинг GEMINI_WORKING_DIR
         working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
         working_dir = (
@@ -154,11 +163,28 @@ class Config:
             ),
             gemini_bin=os.getenv("GEMINI_BIN", cls.gemini_bin),
             gemini_skip_trust=skip_trust,
-            gemini_approval_mode=os.getenv(
-                "GEMINI_APPROVAL_MODE", cls.gemini_approval_mode
+            gemini_approval_mode=_normalize_approval_mode(
+                os.getenv("GEMINI_APPROVAL_MODE", cls.gemini_approval_mode)
             ),
             gemini_working_dir=str(working_dir),
             gemini_include_directories=tuple(dict.fromkeys(include_directories)),
+            gemini_policy_paths=tuple(
+                dict.fromkeys(_parse_csv_values(os.getenv("GEMINI_POLICY_PATHS", "")))
+            ),
+            gemini_admin_policy_paths=tuple(
+                dict.fromkeys(
+                    _parse_csv_values(os.getenv("GEMINI_ADMIN_POLICY_PATHS", ""))
+                )
+            ),
+            gemini_allowed_mcp_server_names=tuple(
+                dict.fromkeys(
+                    _parse_csv_values(os.getenv("GEMINI_ALLOWED_MCP_SERVER_NAMES", ""))
+                )
+            ),
+            gemini_extensions=tuple(
+                dict.fromkeys(_parse_csv_values(os.getenv("GEMINI_EXTENSIONS", "")))
+            ),
+            gemini_screen_reader=screen_reader,
             gemini_artifact_roots=tuple(dict.fromkeys(artifact_roots)),
             gemini_cli_timeout=int(
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
@@ -262,6 +288,11 @@ class Config:
             "gemini_approval_mode": self.gemini_approval_mode,
             "gemini_working_dir": self.gemini_working_dir,
             "gemini_include_directories": self.gemini_include_directories,
+            "gemini_policy_paths": self.gemini_policy_paths,
+            "gemini_admin_policy_paths": self.gemini_admin_policy_paths,
+            "gemini_allowed_mcp_server_names": self.gemini_allowed_mcp_server_names,
+            "gemini_extensions": self.gemini_extensions,
+            "gemini_screen_reader": self.gemini_screen_reader,
             "gemini_artifact_roots": self.gemini_artifact_roots,
             "gemini_cli_timeout": self.gemini_cli_timeout,
             "gemini_shutdown_grace_seconds": self.gemini_shutdown_grace_seconds,
@@ -293,9 +324,7 @@ class Config:
     def approval_mode_flag(self) -> list[str]:
         """Аргументы командной строки для approval-mode."""
         mode = self.gemini_approval_mode
-        if mode == "yolo":
-            return ["--yolo"]
-        elif mode in ("default", "auto_edit", "plan"):
+        if mode in ("default", "auto_edit", "yolo", "plan"):
             return [f"--approval-mode={mode}"]
         return []
 
@@ -315,6 +344,34 @@ class Config:
         if not self.gemini_include_directories:
             return []
         return ["--include-directories", ",".join(self.gemini_include_directories)]
+
+    @property
+    def policy_flags(self) -> list[str]:
+        """Аргументы --policy для пользовательских policy rules."""
+        return _repeat_flag("--policy", self.gemini_policy_paths)
+
+    @property
+    def admin_policy_flags(self) -> list[str]:
+        """Аргументы --admin-policy для дополнительных admin policy rules."""
+        return _repeat_flag("--admin-policy", self.gemini_admin_policy_paths)
+
+    @property
+    def allowed_mcp_server_names_flag(self) -> list[str]:
+        """Аргументы allowlist для MCP-серверов."""
+        return _repeat_flag(
+            "--allowed-mcp-server-names",
+            self.gemini_allowed_mcp_server_names,
+        )
+
+    @property
+    def extensions_flag(self) -> list[str]:
+        """Аргументы выбора Gemini CLI extensions."""
+        return _repeat_flag("--extensions", self.gemini_extensions)
+
+    @property
+    def screen_reader_flag(self) -> list[str]:
+        """Аргумент --screen-reader, если включён."""
+        return ["--screen-reader"] if self.gemini_screen_reader else []
 
 
 def _mask_secret(value: str | None) -> str | None:
@@ -339,6 +396,29 @@ def _resolve_log_level(log_mode: str | None, log_level: str | None) -> str:
         "quiet": "WARNING",
         "debug": "DEBUG",
     }.get(_normalize_log_mode(log_mode), "INFO")
+
+
+def _normalize_approval_mode(value: str | None) -> str:
+    normalized = (value or "yolo").strip().lower()
+    if normalized in {"default", "auto_edit", "yolo", "plan"}:
+        return normalized
+    return "yolo"
+
+
+def _parse_csv_values(raw_value: str) -> list[str]:
+    values: list[str] = []
+    for raw_item in raw_value.strip().split(","):
+        item = raw_item.strip()
+        if item:
+            values.append(item)
+    return values
+
+
+def _repeat_flag(flag: str, values: tuple[str, ...]) -> list[str]:
+    args: list[str] = []
+    for value in values:
+        args.extend([flag, value])
+    return args
 
 
 def _parse_existing_directories(raw_value: str, env_name: str) -> list[str]:

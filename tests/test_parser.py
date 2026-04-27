@@ -85,6 +85,7 @@ def test_parser_tracks_message_delta_flag() -> None:
 
 def test_parser_marks_empty_result() -> None:
     payload = {
+        "status": "success",
         "type": "result",
         "stats": {"total_tokens": 10, "thoughts_tokens": 10, "duration_ms": 1200},
     }
@@ -94,6 +95,47 @@ def test_parser_marks_empty_result() -> None:
     assert event.event_type == "result_stats"
     assert event.is_done is True
     assert event.is_empty_response is True
+    assert event.result_status == "success"
+    assert event.stats["total_tokens"] == 10
+
+
+def test_parser_sums_nested_model_stats() -> None:
+    payload = {
+        "status": "success",
+        "type": "result",
+        "stats": {
+            "models": {
+                "gemini-3-pro": {
+                    "total_tokens": 12,
+                    "thoughts_tokens": 3,
+                },
+                "gemini-3-flash": {
+                    "totalTokens": 8,
+                    "thoughtsTokens": 2,
+                },
+            }
+        },
+    }
+
+    event = GeminiStreamParser.parse_line(json.dumps(payload, ensure_ascii=False))
+
+    assert event.total_tokens == 20
+    assert event.thoughts_tokens == 5
+
+
+def test_parser_preserves_error_code_and_exit_code() -> None:
+    payload = {
+        "type": "error",
+        "error": {"code": "TURN_LIMIT", "message": "Turn limit exceeded"},
+        "exitCode": 53,
+    }
+
+    event = GeminiStreamParser.parse_line(json.dumps(payload, ensure_ascii=False))
+
+    assert event.event_type == "error"
+    assert event.error_code == "TURN_LIMIT"
+    assert event.exit_code == 53
+    assert "Turn limit" in event.error_message
 
 
 def test_parser_logs_unknown_event_payload_in_debug(caplog) -> None:

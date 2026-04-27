@@ -87,6 +87,25 @@ async def callback_resume_session(
     await callback.answer()
 
 
+@router.callback_query(F.data == "session:open-latest")
+async def callback_resume_latest_session(
+    callback: CallbackQuery, session_manager: SessionManager
+) -> None:
+    sessions = await session_manager.get_sessions_list()
+    if not sessions:
+        await callback.answer("Список пуст", show_alert=True)
+        return
+
+    await session_manager.set_active_session(callback.from_user.id, "latest")
+    await callback.message.edit_text(
+        "✅ <b>Диалог latest выбран.</b>\n"
+        "Gemini CLI сам откроет самый свежий сохранённый диалог "
+        "через <code>--resume latest</code>.",
+        reply_markup=None,
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("session:page:"))
 async def callback_sessions_page(
     callback: CallbackQuery,
@@ -200,24 +219,16 @@ def _parse_session_page(data: str, prefix: str) -> int:
 async def callback_interactive_approve(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
-    """Ответ на интерактивный аппрув от Gemini."""
-    action = callback.data.split(":")[1]
-
-    if action == "yolo":
-        answer = "yes"
-    else:
-        answer = action
-
-    await session_manager.answer_approval(answer)
+    """Поддержка старых approval-кнопок, отправленных до headless-обновления."""
+    del session_manager
 
     await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.reply(
+        "⚠️ Интерактивное подтверждение недоступно в headless stream-json. "
+        "Настройте GEMINI_APPROVAL_MODE или policy rules и повторите запрос."
+    )
 
-    if answer == "yes":
-        await callback.message.reply("✅ Действие одобрено.")
-    else:
-        await callback.message.reply("❌ Действие отклонено.")
-
-    await callback.answer()
+    await callback.answer("Headless approval не поддерживается", show_alert=True)
 
 
 # ======================== Settings ========================
@@ -419,6 +430,7 @@ async def callback_mcp_toggle(
 
 
 @router.callback_query(F.data == "mcp_refresh")
+@router.callback_query(F.data == "mcp_reload")
 async def callback_mcp_refresh(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
@@ -443,10 +455,19 @@ async def callback_mcp_refresh(
         await callback.message.edit_reply_markup(
             reply_markup=inline.get_mcp_list_keyboard(servers)
         )
-        await callback.answer("🔄 Список обновлён")
+        if callback.data == "mcp_reload":
+            await callback.answer("♻️ Headless reload недоступен; список перечитан")
+        else:
+            await callback.answer("🔄 Список обновлён")
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower():
-            await callback.answer("✅ Список актуален", show_alert=False)
+            if callback.data == "mcp_reload":
+                await callback.answer(
+                    "♻️ Headless reload недоступен; список уже актуален",
+                    show_alert=False,
+                )
+            else:
+                await callback.answer("✅ Список актуален", show_alert=False)
         else:
             raise
 
@@ -478,6 +499,7 @@ async def callback_skill_toggle(
 
 
 @router.callback_query(F.data == "skill_refresh")
+@router.callback_query(F.data == "skill_reload")
 async def callback_skill_refresh(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
@@ -502,9 +524,18 @@ async def callback_skill_refresh(
         await callback.message.edit_reply_markup(
             reply_markup=inline.get_skills_list_keyboard(skills)
         )
-        await callback.answer("🔄 Список обновлён")
+        if callback.data == "skill_reload":
+            await callback.answer("♻️ Headless reload недоступен; список перечитан")
+        else:
+            await callback.answer("🔄 Список обновлён")
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower():
-            await callback.answer("✅ Список актуален", show_alert=False)
+            if callback.data == "skill_reload":
+                await callback.answer(
+                    "♻️ Headless reload недоступен; список уже актуален",
+                    show_alert=False,
+                )
+            else:
+                await callback.answer("✅ Список актуален", show_alert=False)
         else:
             raise

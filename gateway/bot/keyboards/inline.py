@@ -113,7 +113,8 @@ def get_mcp_list_keyboard(servers: list[tuple[str, bool]]) -> InlineKeyboardMark
     builder.adjust(1)
     # Добавляем кнопку обновления
     builder.row(
-        InlineKeyboardButton(text="🔄 Обновить список", callback_data="mcp_refresh")
+        InlineKeyboardButton(text="🔄 Обновить список", callback_data="mcp_refresh"),
+        InlineKeyboardButton(text="♻️ Reload", callback_data="mcp_reload"),
     )
     return builder.as_markup()
 
@@ -133,6 +134,7 @@ def get_skills_list_keyboard(skills: list[tuple[str, bool]]) -> InlineKeyboardMa
     builder.adjust(1)
     # Добавляем кнопку обновления
     builder.row(
-        InlineKeyboardButton(text="🔄 Обновить список", callback_data="skill_refresh")
+        InlineKeyboardButton(text="🔄 Обновить список", callback_data="skill_refresh"),
+        InlineKeyboardButton(text="♻️ Reload", callback_data="skill_reload"),
     )
     return builder.as_markup()

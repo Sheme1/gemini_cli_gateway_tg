@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import asyncio
+import shutil
 from dataclasses import asdict, dataclass
 from html import escape
 from pathlib import Path
@@ -85,6 +87,7 @@ async def run_doctor() -> DoctorReport:
     checks.append(_headless_trust_check(config))
     checks.extend(_python_import_checks())
     checks.extend(await _runtime_checks(config))
+    checks.extend(await _gemini_capability_checks(config))
     checks.extend(_path_checks(config))
     return DoctorReport(checks=checks, config=config.redacted_dict())
 
@@ -224,6 +227,75 @@ async def _runtime_checks(config: Config) -> list[DoctorCheck]:
     return checks
 
 
+async def _gemini_capability_checks(config: Config) -> list[DoctorCheck]:
+    required_flags = {
+        "--skip-trust",
+        "--approval-mode",
+        "--policy",
+        "--admin-policy",
+        "--acp",
+        "--raw-output",
+    }
+    try:
+        output = await _command_output(
+            config.gemini_bin, "--help", cwd=config.gemini_working_dir
+        )
+    except Exception as exc:
+        return [
+            DoctorCheck(
+                name="gemini capabilities",
+                status="warn",
+                details=f"{type(exc).__name__}: {exc}",
+                hint="Не удалось проверить `gemini --help`; version check уже выполнен отдельно.",
+            )
+        ]
+
+    missing = sorted(flag for flag in required_flags if flag not in output)
+    if missing:
+        return [
+            DoctorCheck(
+                name="gemini capabilities",
+                status="warn",
+                details="missing flags: " + ", ".join(missing),
+                hint=(
+                    "Установленная версия Gemini CLI может отличаться от ожидаемой "
+                    f"{config.gemini_target_version} или иметь другой набор флагов."
+                ),
+            )
+        ]
+    return [
+        DoctorCheck(
+            name="gemini capabilities",
+            status="ok",
+            details=f"{config.gemini_target_version} headless/security flags are available.",
+        )
+    ]
+
+
+async def _command_output(command: str, *args: str, cwd: str | None = None) -> str:
+    executable = shutil.which(command) or command
+    process = await asyncio.create_subprocess_exec(
+        executable,
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(f"{command} did not answer within 10 seconds") from exc
+
+    output = (stdout + stderr).decode("utf-8", errors="replace")
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"{command} exited with code {process.returncode}: {output[:500]}"
+        )
+    return output
+
+
 def _path_checks(config: Config) -> list[DoctorCheck]:
     checks = [
         _directory_check("GEMINI_WORKING_DIR", Path(config.gemini_working_dir), True),
@@ -233,6 +305,10 @@ def _path_checks(config: Config) -> list[DoctorCheck]:
         checks.append(_directory_check("GEMINI_INCLUDE_DIRECTORIES", Path(path), False))
     for path in config.gemini_artifact_roots:
         checks.append(_directory_check("GEMINI_ARTIFACT_ROOTS", Path(path), False))
+    for path in config.gemini_policy_paths:
+        checks.append(_path_exists_check("GEMINI_POLICY_PATHS", Path(path)))
+    for path in config.gemini_admin_policy_paths:
+        checks.append(_path_exists_check("GEMINI_ADMIN_POLICY_PATHS", Path(path)))
     return checks
 
 
@@ -272,3 +348,15 @@ def _directory_check(name: str, path: Path, require_writable: bool) -> DoctorChe
             hint="Дайте пользователю сервиса права на запись.",
         )
     return DoctorCheck(name=name, status="ok", details=f"{path} writable")
+
+
+def _path_exists_check(name: str, path: Path) -> DoctorCheck:
+    resolved = path.expanduser()
+    if resolved.exists():
+        return DoctorCheck(name=name, status="ok", details=str(resolved))
+    return DoctorCheck(
+        name=name,
+        status="warn",
+        details=f"{resolved} не найден",
+        hint="Gemini CLI вернёт ошибку, если переданный policy путь недоступен.",
+    )

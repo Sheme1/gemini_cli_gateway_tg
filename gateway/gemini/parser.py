@@ -61,6 +61,10 @@ class StreamEvent:
     total_tokens: int = 0
     duration_ms: int = 0
     thoughts_tokens: int = 0
+    stats: dict[str, Any] = field(default_factory=dict)
+    result_status: str = ""
+    error_code: str = ""
+    exit_code: int | None = None
     error_message: str = ""
     invalid_stream_reason: str = ""
     status_message: str = ""
@@ -88,6 +92,109 @@ def _preview(text: str, limit: int = 280) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit].rstrip() + "..."
+
+
+def _int_from_payload(*values: Any) -> int:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _extract_total_tokens(stats: dict[str, Any]) -> int:
+    total = _int_from_payload(
+        stats.get("total_tokens"),
+        stats.get("totalTokens"),
+        stats.get("total_token_count"),
+        stats.get("totalTokenCount"),
+    )
+    if total:
+        return total
+
+    for key in ("models", "per_model", "perModel", "model_usage", "modelUsage"):
+        value = stats.get(key)
+        if isinstance(value, list):
+            summed = sum(
+                _extract_total_tokens(item) for item in value if isinstance(item, dict)
+            )
+            if summed:
+                return summed
+        if isinstance(value, dict):
+            summed = sum(
+                _extract_total_tokens(item)
+                for item in value.values()
+                if isinstance(item, dict)
+            )
+            if summed:
+                return summed
+
+    return 0
+
+
+def _extract_thoughts_tokens(stats: dict[str, Any]) -> int:
+    total = _int_from_payload(
+        stats.get("thoughts_tokens"),
+        stats.get("thoughtsTokens"),
+        stats.get("thoughts_token_count"),
+        stats.get("thoughtsTokenCount"),
+    )
+    if total:
+        return total
+
+    for key in ("models", "per_model", "perModel", "model_usage", "modelUsage"):
+        value = stats.get(key)
+        if isinstance(value, list):
+            summed = sum(
+                _extract_thoughts_tokens(item)
+                for item in value
+                if isinstance(item, dict)
+            )
+            if summed:
+                return summed
+        if isinstance(value, dict):
+            summed = sum(
+                _extract_thoughts_tokens(item)
+                for item in value.values()
+                if isinstance(item, dict)
+            )
+            if summed:
+                return summed
+
+    return 0
+
+
+def _extract_duration_ms(stats: dict[str, Any]) -> int:
+    return _int_from_payload(
+        stats.get("duration_ms"),
+        stats.get("durationMs"),
+        stats.get("api_latency_ms"),
+        stats.get("apiLatencyMs"),
+    )
+
+
+def _extract_error_message(data: dict[str, Any]) -> str:
+    error_value = data.get("error")
+    if isinstance(error_value, dict):
+        return _stringify_payload(
+            error_value.get("message")
+            or error_value.get("details")
+            or error_value.get("code")
+            or error_value
+        )
+    return _stringify_payload(
+        data.get("message") or error_value or "Неизвестная ошибка"
+    )
+
+
+def _extract_error_code(data: dict[str, Any]) -> str:
+    error_value = data.get("error")
+    if isinstance(error_value, dict):
+        return _stringify_payload(error_value.get("code") or error_value.get("status"))
+    return _stringify_payload(data.get("code") or data.get("status"))
 
 
 def _normalize_path_candidate(raw_value: str) -> str:
@@ -224,9 +331,10 @@ class GeminiStreamParser:
 
         if raw_type == "result":
             stats = data.get("stats", {}) if isinstance(data.get("stats"), dict) else {}
-            total_tokens = int(stats.get("total_tokens", 0) or 0)
-            duration_ms = int(stats.get("duration_ms", 0) or 0)
-            thoughts_tokens = int(stats.get("thoughts_tokens", 0) or 0)
+            total_tokens = _extract_total_tokens(stats)
+            duration_ms = _extract_duration_ms(stats)
+            thoughts_tokens = _extract_thoughts_tokens(stats)
+            result_status = _stringify_payload(data.get("status")).strip().lower()
             is_empty = total_tokens == 0 or (
                 thoughts_tokens > 0 and total_tokens == thoughts_tokens
             )
@@ -243,16 +351,21 @@ class GeminiStreamParser:
                 total_tokens=total_tokens,
                 duration_ms=duration_ms,
                 thoughts_tokens=thoughts_tokens,
+                stats=stats,
+                result_status=result_status,
                 is_done=True,
                 is_empty_response=is_empty,
             )
 
         if raw_type == "error":
+            exit_code = data.get("exit_code", data.get("exitCode"))
             return StreamEvent(
                 event_type="error",
-                error_message=_stringify_payload(
-                    data.get("message", "Неизвестная ошибка")
-                ),
+                error_message=_extract_error_message(data),
+                error_code=_extract_error_code(data),
+                exit_code=_int_from_payload(exit_code)
+                if exit_code is not None
+                else None,
             )
 
         if raw_type == "invalid_stream":

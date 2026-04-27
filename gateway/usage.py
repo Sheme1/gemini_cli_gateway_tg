@@ -90,6 +90,9 @@ class UsageLedger:
         model: str,
         total_tokens: int,
         duration_ms: int,
+        thoughts_tokens: int = 0,
+        result_status: str = "",
+        stats: dict[str, Any] | None = None,
     ) -> None:
         tokens = max(0, int(total_tokens or 0))
         today = _today()
@@ -107,7 +110,11 @@ class UsageLedger:
                 "model": model,
                 "total_tokens": tokens,
                 "duration_ms": max(0, int(duration_ms or 0)),
+                "thoughts_tokens": max(0, int(thoughts_tokens or 0)),
+                "result_status": result_status,
             }
+            if stats:
+                self._data["last_request"]["stats"] = _compact_stats(stats)
             self._write_locked()
 
     def _load(self) -> dict[str, Any]:
@@ -153,3 +160,21 @@ class UsageLedger:
 
 def _today() -> str:
     return datetime.now(UTC).date().isoformat()
+
+
+def _compact_stats(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return str(value)[:200]
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            if len(compact) >= 30:
+                compact["..."] = "truncated"
+                break
+            compact[str(key)] = _compact_stats(item, depth=depth + 1)
+        return compact
+    if isinstance(value, list):
+        return [_compact_stats(item, depth=depth + 1) for item in value[:20]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)

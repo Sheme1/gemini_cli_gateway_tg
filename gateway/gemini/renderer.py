@@ -80,10 +80,17 @@ def render_event(event: StreamEvent, render_mode: str = DEFAULT_RENDER_MODE) -> 
         )
 
     if event.event_type == "result_stats":
-        if event.total_tokens or event.duration_ms:
-            return (
-                f"\n\n📊 Токены: {event.total_tokens} · {event.duration_ms / 1000:.1f}с"
-            )
+        parts: list[str] = []
+        if event.total_tokens:
+            parts.append(f"токены: {event.total_tokens}")
+        if event.thoughts_tokens:
+            parts.append(f"thinking: {event.thoughts_tokens}")
+        if event.duration_ms:
+            parts.append(f"{event.duration_ms / 1000:.1f}с")
+        if event.result_status and event.result_status not in {"success", "ok"}:
+            parts.append(f"status: {event.result_status}")
+        if parts:
+            return "\n\n📊 " + " · ".join(parts)
         return ""
 
     return ""
