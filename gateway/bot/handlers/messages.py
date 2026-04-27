@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Any
 
-from aiogram import F, Router
+from aiogram import F, Router, html
 from aiogram.types import Message
 
 from gateway.artifacts import ArtifactManager
@@ -13,6 +13,11 @@ from gateway.bot.keyboards import inline
 from gateway.config import Config
 from gateway.gemini.renderer import render_event
 from gateway.gemini.session import SessionManager
+from gateway.init_wizard import (
+    InitWizardStore,
+    build_gemini_md_prompt,
+    sanitize_gemini_md,
+)
 from gateway.prompt_guard import PendingPromptStore
 from gateway.streaming.editor import StreamEditor
 from gateway.usage import UsageLedger
@@ -31,6 +36,7 @@ async def message_handler(
     user_settings: UserSettingsStore,
     usage_ledger: UsageLedger,
     prompt_guard: PendingPromptStore,
+    init_wizard: InitWizardStore,
 ) -> None:
     """Обрабатывает текстовые сообщения и отправляет их в Gemini CLI."""
     prompt = message.text
@@ -39,6 +45,19 @@ async def message_handler(
 
     chat_id = message.chat.id
     user_id = message.from_user.id
+
+    if config.gateway_experimental_multi_user_workspaces and init_wizard.has_pending(
+        user_id
+    ):
+        await _handle_init_answer(
+            message=message,
+            prompt=prompt,
+            session_manager=session_manager,
+            config=config,
+            user_settings=user_settings,
+            init_wizard=init_wizard,
+        )
+        return
 
     if message.reply_to_message and message.reply_to_message.text:
         reply_username = (
@@ -63,6 +82,68 @@ async def message_handler(
         usage_ledger=usage_ledger,
         prompt_guard=prompt_guard,
     )
+
+
+async def _handle_init_answer(
+    *,
+    message: Message,
+    prompt: str,
+    session_manager: SessionManager,
+    config: Config,
+    user_settings: UserSettingsStore,
+    init_wizard: InitWizardStore,
+) -> None:
+    user_id = message.from_user.id
+    if init_wizard.is_waiting_for_preview_or_confirmation(user_id):
+        await message.answer(
+            "🧩 Анкета уже заполнена. Дождитесь preview и используйте кнопки "
+            "под сообщением или отправьте /init reset."
+        )
+        return
+
+    result = init_wizard.answer(user_id, prompt)
+    if not result.complete:
+        question_number = init_wizard.current_question_number(user_id)
+        await message.answer(
+            f"🧩 <b>Вопрос {question_number}:</b> {html.quote(result.next_question)}"
+        )
+        return
+
+    profile = result.profile or {}
+    status_message = await message.answer(
+        "🧩 Анкета заполнена. Генерирую preview личного GEMINI.md..."
+    )
+    effective_model = user_settings.get_effective_model(user_id, config.gemini_model)
+    try:
+        generated = await session_manager.generate_text(
+            build_gemini_md_prompt(profile),
+            user_id=user_id,
+            model=effective_model,
+            approval_mode="plan",
+        )
+        markdown = sanitize_gemini_md(generated)
+        init_wizard.save_preview(user_id, markdown)
+    except Exception as exc:
+        init_wizard.cancel_preview(user_id)
+        await status_message.edit_text(
+            "❌ Не удалось сгенерировать GEMINI.md через Gemini CLI.\n\n"
+            f"<code>{html.quote(str(exc))}</code>\n\n"
+            "Используйте /init и попробуйте ещё раз."
+        )
+        return
+
+    await status_message.edit_text(
+        "🧩 <b>Preview личного GEMINI.md</b>\n\n"
+        f"<pre>{html.quote(_clip_preview(markdown))}</pre>\n\n"
+        "Записать этот файл в ваш личный workspace?",
+        reply_markup=inline.get_init_preview_keyboard(),
+    )
+
+
+def _clip_preview(markdown: str, limit: int = 3200) -> str:
+    if len(markdown) <= limit:
+        return markdown
+    return markdown[: limit - 40].rstrip() + "\n\n... preview truncated ..."
 
 
 async def process_gemini_prompt(
@@ -141,7 +222,7 @@ async def process_gemini_prompt(
         min_update_chars=config.stream_min_update_chars,
         retry_max_delay=config.stream_retry_max_delay,
     )
-    artifact_manager = ArtifactManager(config)
+    artifact_manager = ArtifactManager(config, user_id=user_id)
     render_mode = user_settings.get_render_mode(user_id)
     effective_model = getattr(
         user_settings,

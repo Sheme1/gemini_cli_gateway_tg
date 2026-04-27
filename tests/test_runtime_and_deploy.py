@@ -57,6 +57,8 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         monkeypatch.setenv("LOG_MODE", "debug")
         monkeypatch.delenv("LOG_LEVEL", raising=False)
         monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES", "true")
+        monkeypatch.setenv("GATEWAY_USER_WORKSPACES_DIR", str(tmp_path / "users"))
 
         config = Config.from_env()
 
@@ -95,7 +97,12 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.log_mode == "debug"
         assert config.log_level == "DEBUG"
         assert config.gateway_state_dir == str((tmp_path / "state").resolve())
+        assert config.gateway_experimental_multi_user_workspaces is True
+        assert config.gateway_user_workspaces_dir == str((tmp_path / "users").resolve())
         assert config.redacted_dict()["gemini_skip_trust"] is False
+        assert (
+            config.redacted_dict()["gateway_experimental_multi_user_workspaces"] is True
+        )
         assert config.redacted_dict()["telegram_bot_token"] == "1234...oken"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
@@ -193,10 +200,12 @@ def test_readmes_document_multi_chat_id_and_update_flow() -> None:
 
     for text in (readme_en, readme_ru, env_example):
         assert "TARGET_CHAT_ID=111111111,222222222" in text
+        assert "GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES" in text
     for text in (readme_en, readme_ru):
         assert "update.sh" in text
         assert "git pull --ff-only" in text
         assert "daemon-reload" in text
+        assert "/init" in text
 
 
 @pytest.mark.asyncio

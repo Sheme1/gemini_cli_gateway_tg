@@ -67,7 +67,7 @@ class _FakeSessionManager:
         ]
         self.active: tuple[int, str] | None = None
 
-    async def get_sessions_list(self):
+    async def get_sessions_list(self, *_args, **_kwargs):
         return self.sessions
 
     async def set_active_session(self, user_id: int, session_id: str) -> None:

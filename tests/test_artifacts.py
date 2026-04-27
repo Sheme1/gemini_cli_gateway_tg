@@ -171,3 +171,32 @@ def test_artifact_manager_waits_for_stable_file_before_sending() -> None:
         assert third == [document.resolve()]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_artifact_manager_uses_per_user_roots_when_enabled() -> None:
+    tmp_path = make_test_dir()
+    try:
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(legacy),
+            gemini_artifact_roots=(str(legacy),),
+            gateway_state_dir=str(tmp_path / "state"),
+            gateway_experimental_multi_user_workspaces=True,
+            gateway_user_workspaces_dir=str(tmp_path / "users"),
+        )
+        manager = ArtifactManager(config, user_id=42)
+        user_file = Path(manager.working_dir) / "user-report.pdf"
+        legacy_file = legacy / "legacy-report.pdf"
+        started_at = time.time()
+        user_file.write_text("user", encoding="utf-8")
+        legacy_file.write_text("legacy", encoding="utf-8")
+
+        found = manager._scan_recent_files(started_at=started_at - 1)
+
+        assert user_file.resolve() in found
+        assert legacy_file.resolve() not in found
+        assert all("tg-user-42" in str(root) for root in manager.roots)
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)

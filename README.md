@@ -39,6 +39,7 @@ Gemini CLI is great in the terminal, but sometimes you want that same workflow f
 - MCP list and toggle UI
 - Skills list and toggle UI
 - Per-user model presets: `auto`, `pro`, `flash`, `flash-lite`, plus legacy manual presets
+- Experimental per-user workspaces and personal `GEMINI.md` via `/init`
 - Oversized prompt confirmation and daily token usage tracking
 - Voice message transcription through Gemini API
 - Automatic artifact discovery and file delivery
@@ -142,6 +143,8 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `POLLING_TIMEOUT` | No | Telegram long-polling timeout passed to aiogram. |
 | `POLLING_CONCURRENCY_LIMIT` | No | Maximum concurrent update handlers. Per-user prompt locks still prevent overlapping Gemini prompts. |
 | `GATEWAY_STATE_DIR` | No | Writable gateway state directory for user settings. Relative paths resolve from the process working directory. |
+| `GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES` | No | `false` by default. When `true`, each Telegram `from_user.id` gets a separate workspace, project sessions, artifacts, profile, and `GEMINI.md`, while Gemini CLI auth/HOME remains shared. |
+| `GATEWAY_USER_WORKSPACES_DIR` | No | Base directory for experimental per-user workspaces. Empty/default means `<GATEWAY_STATE_DIR>/users`; for Ubuntu/systemd use something like `/srv/gemini-gateway/users`. |
 | `APPROVAL_TIMEOUT` | No | Seconds before pending interactive approval expires. Headless approval is still limited by Gemini CLI behavior. |
 | `LOG_MODE` | No | `quiet`, `normal`, or `debug`. Controls default Python logging level. |
 | `LOG_LEVEL` | No | Legacy explicit Python logging level override. Leave empty to use `LOG_MODE`. |
@@ -174,6 +177,18 @@ pip install -r requirements.txt
 npm install -g @google/gemini-cli
 cp .env.example .env
 ```
+
+For a family/shared Ubuntu server, a practical state layout is:
+
+```env
+GATEWAY_STATE_DIR=/srv/gemini-gateway/state
+GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES=true
+GATEWAY_USER_WORKSPACES_DIR=/srv/gemini-gateway/users
+```
+
+This mode is opt-in. To disable it later, set
+`GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES=false` and run
+`sudo systemctl restart telegram-gateway`.
 
 Then run:
 
@@ -247,6 +262,8 @@ If you use Docker, remember that Gemini CLI auth lives inside the container volu
 | `/sessions [filter\|latest]` | Page through saved Gemini sessions, search by title/id/index, resume latest, delete, or export the list as TXT |
 | `/mcp` | Show installed MCP servers |
 | `/skills` | Show installed Gemini skills |
+| `/init` | Start the personal `GEMINI.md` setup wizard |
+| `/init reset` | Reset the wizard answers and generate a new preview |
 | `/model` | Pick the active Gemini model |
 | `/settings` | Change render mode and approval mode |
 | `/context` | Show the current user model, preset, session id, and workspace |
@@ -267,6 +284,26 @@ This gateway currently uses a headless request model:
 4. later prompts continue the same context with `--resume`
 
 That keeps conversations continuous without depending on one forever-running subprocess.
+
+When `GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES=true`, the gateway resolves a
+separate filesystem scope for every Telegram `from_user.id`:
+
+```text
+<GATEWAY_USER_WORKSPACES_DIR>/tg-user-123456789/
+  workspace/GEMINI.md
+  artifacts/
+  profile.json
+```
+
+Prompt runs use that user's `workspace/` as the Gemini CLI project directory, so
+Gemini project sessions and `GEMINI.md` stay separate. Artifact delivery only
+scans that user's workspace/artifacts directories. Gemini CLI auth, `HOME`, MCP,
+skills, and global CLI settings remain shared because this mode intentionally
+keeps one server account and one Gemini login.
+
+`/init` asks a short questionnaire, stores the answers in `profile.json`, asks
+Gemini CLI to generate a Markdown preview, and writes `workspace/GEMINI.md` only
+after the user confirms it.
 
 `/sessions` uses `gemini --list-sessions`, parses the Gemini CLI 0.39.1 text
 format, reverses it so the newest chats appear first, and shows five dialogs per
@@ -296,6 +333,7 @@ This is where the MVP still feels like an MVP:
 
 - interactive approval is not continued from Telegram in headless mode; use approval mode or policy rules
 - Gemini CLI output formats can change between releases
+- experimental multi-user workspaces isolate project files, not the shared Gemini CLI auth/HOME
 - Linux + `systemd` is the main target; other deployment modes may need local tweaks
 - some users will prefer keeping a fork for their own workflow, auth model, or deployment setup
 

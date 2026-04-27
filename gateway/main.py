@@ -15,6 +15,7 @@ from gateway.bot.middleware.auth import AuthMiddleware
 from gateway.config import Config
 from gateway.doctor import format_doctor_json, format_doctor_text, run_doctor
 from gateway.gemini.session import SessionManager
+from gateway.init_wizard import InitWizardStore
 from gateway.prompt_guard import PendingPromptStore
 from gateway.runtime import GatewayRuntimeState, build_status_text, startup_preflight
 from gateway.usage import UsageLedger
@@ -74,6 +75,7 @@ async def main(
     user_settings = UserSettingsStore(state_dir=Path(config.gateway_state_dir))
     usage_ledger = UsageLedger(state_dir=Path(config.gateway_state_dir))
     prompt_guard = PendingPromptStore()
+    init_wizard = InitWizardStore(config)
 
     try:
         await startup_preflight(config, bot, runtime_state)
@@ -104,6 +106,7 @@ async def main(
             BotCommand(command="sessions", description="📂 Загрузить прошлую сессию"),
             BotCommand(command="mcp", description="🔌 Управление MCP серверами"),
             BotCommand(command="skills", description="🧠 Управление навыками"),
+            BotCommand(command="init", description="🧩 Личный GEMINI.md"),
             BotCommand(command="model", description="Выбрать модель Gemini"),
             BotCommand(command="settings", description="Настройки бота и вывода"),
             BotCommand(command="status", description="Статус шлюза Gemini"),
@@ -123,6 +126,7 @@ async def main(
         runtime_state=runtime_state,
         usage_ledger=usage_ledger,
         prompt_guard=prompt_guard,
+        init_wizard=init_wizard,
     )
 
     # Регистрация middlewares

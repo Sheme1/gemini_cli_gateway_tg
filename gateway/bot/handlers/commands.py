@@ -9,6 +9,7 @@ from gateway.bot.ui import build_settings_text
 from gateway.config import Config
 from gateway.doctor import format_doctor_text, run_doctor
 from gateway.gemini.session import SessionManager
+from gateway.init_wizard import InitWizardStore
 from gateway.model_presets import MODEL_PRESETS, get_model_preset_label
 from gateway.prompt_guard import PendingPromptStore
 from gateway.runtime import (
@@ -36,6 +37,7 @@ async def command_start_handler(
         f"📂 /sessions [фильтр|latest] — список прошлых диалогов\n"
         f"⏹ /cancel — остановить текущий запрос\n"
         f"⚙️ /settings — настройки отображения и режима работы\n"
+        f"🧩 /init — настроить личный GEMINI.md\n"
         f"🧭 /context — текущая модель и контекст\n"
         f"📊 /usage — расход токенов за день\n"
         f"🩺 /doctor — проверка окружения\n"
@@ -58,6 +60,48 @@ async def command_new_handler(
     )
 
 
+@router.message(Command("init"))
+async def command_init_handler(
+    message: Message,
+    config: Config,
+    init_wizard: InitWizardStore,
+) -> None:
+    """Запускает wizard создания личного GEMINI.md."""
+    if not config.gateway_experimental_multi_user_workspaces:
+        await message.answer(
+            "🧩 /init доступен только в experimental multi-user workspace режиме.\n\n"
+            "Включите в .env:\n"
+            "<code>GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES=true</code>\n"
+            "и перезапустите сервис."
+        )
+        return
+
+    args = message.text.split(maxsplit=1) if message.text else ["/init"]
+    action = args[1].strip().lower() if len(args) > 1 else ""
+    user_id = message.from_user.id
+    prefix = ""
+    if action == "reset":
+        init_wizard.reset(user_id)
+        prefix = (
+            "♻️ Анкета сброшена. Текущий GEMINI.md останется активным "
+            "до подтверждения нового preview.\n\n"
+        )
+    elif init_wizard.has_pending(user_id):
+        await message.answer(
+            "🧩 Анкета уже начата.\n\n"
+            f"<b>Текущий вопрос:</b>\n{html.quote(init_wizard.current_question(user_id))}"
+        )
+        return
+
+    question = init_wizard.start(user_id)
+    await message.answer(
+        prefix + "🧩 <b>Инициализация личного Gemini-профиля</b>\n\n"
+        "Ответьте на несколько вопросов. После этого я покажу preview GEMINI.md "
+        "и запишу файл только после подтверждения.\n\n"
+        f"<b>Вопрос 1:</b> {html.quote(question)}"
+    )
+
+
 @router.message(Command("sessions"))
 async def command_sessions_handler(
     message: Message, session_manager: SessionManager
@@ -69,7 +113,7 @@ async def command_sessions_handler(
         "⏳ <i>Запрашиваю список диалогов...</i>", parse_mode="HTML"
     )
     try:
-        sessions = await session_manager.get_sessions_list()
+        sessions = await session_manager.get_sessions_list(message.from_user.id)
         if not sessions:
             await status_message.edit_text("📂 Сохранённые диалоги не найдены.")
             return
@@ -130,6 +174,7 @@ async def command_mcp_handler(
             "⏳ <i>Загружаю список MCP-серверов...</i>", parse_mode="HTML"
         )
         servers = await session_manager.get_mcp_list()
+        is_shared = config.gateway_experimental_multi_user_workspaces
 
         # Fallback для пустого списка
         if not servers:
@@ -141,6 +186,11 @@ async def command_mcp_handler(
             return
 
         text = "🔌 <b>Установленные MCP-серверы:</b>\n\n"
+        if is_shared:
+            text += (
+                "⚠️ Experimental multi-user mode включён: MCP-конфигурация общая "
+                "для всего systemd-пользователя. Переключатели скрыты.\n\n"
+            )
         for name, enabled in servers:
             icon = "🟢" if enabled else "🔴"
             status_text = "" if enabled else " <i>(отключен)</i>"
@@ -155,7 +205,12 @@ async def command_mcp_handler(
             "Или просто упомяните <code>@имя_сервера</code> в сообщении."
         )
         await message.answer(
-            text, reply_markup=inline.get_mcp_list_keyboard(servers), parse_mode="HTML"
+            text,
+            reply_markup=inline.get_mcp_list_keyboard(
+                servers,
+                allow_toggle=not is_shared,
+            ),
+            parse_mode="HTML",
         )
         return
 
@@ -197,6 +252,7 @@ async def command_skills_handler(
             "⏳ <i>Запрашиваю список навыков...</i>", parse_mode="HTML"
         )
         skills = await session_manager.get_skills_list()
+        is_shared = config.gateway_experimental_multi_user_workspaces
 
         # Fallback для пустого списка
         if not skills:
@@ -208,6 +264,11 @@ async def command_skills_handler(
             return
 
         text = "🧠 <b>Установленные навыки:</b>\n\n"
+        if is_shared:
+            text += (
+                "⚠️ Experimental multi-user mode включён: skills-конфигурация общая "
+                "для всего systemd-пользователя. Переключатели скрыты.\n\n"
+            )
         for name, enabled in skills:
             icon = "🟢" if enabled else "🔴"
             status_text = "" if enabled else " <i>(отключен)</i>"
@@ -222,7 +283,10 @@ async def command_skills_handler(
         )
         await message.answer(
             text,
-            reply_markup=inline.get_skills_list_keyboard(skills),
+            reply_markup=inline.get_skills_list_keyboard(
+                skills,
+                allow_toggle=not is_shared,
+            ),
             parse_mode="HTML",
         )
         return
@@ -299,6 +363,7 @@ async def command_context_handler(
     model = user_settings.get_effective_model(user_id, config.gemini_model)
     preset_label = get_model_preset_label(preset)
     active_session = session_manager.get_active_session(user_id) or "новый диалог"
+    environment = session_manager.user_environments.describe_for(user_id)
     include_dirs = (
         ", ".join(config.gemini_include_directories)
         if config.gemini_include_directories
@@ -334,8 +399,16 @@ async def command_context_handler(
         f"<b>Gemini CLI:</b> <code>{html.quote(current_gemini)}</code> "
         f"(target <code>{html.quote(config.gemini_target_version)}</code>)\n"
         f"<b>Session:</b> <code>{html.quote(active_session)}</code>\n"
-        f"<b>Working dir:</b> <code>{html.quote(config.gemini_working_dir)}</code>\n"
-        f"<b>Include dirs:</b> <code>{html.quote(include_dirs)}</code>\n"
+        f"<b>Isolation:</b> <code>{html.quote(environment['mode'])}</code>\n"
+        f"<b>Shared auth/HOME:</b> <code>{html.quote(environment['shared_auth'])}</code>\n"
+        f"<b>Working dir:</b> <code>{html.quote(environment['working_dir'])}</code>\n"
+        f"<b>Artifacts:</b> <code>{html.quote(environment['artifact_roots'])}</code>\n"
+        + (
+            f"<b>GEMINI.md:</b> <code>{html.quote(environment.get('gemini_md', ''))}</code>\n"
+            if environment["mode"] == "multi-user"
+            else ""
+        )
+        + f"<b>Include dirs:</b> <code>{html.quote(include_dirs)}</code>\n"
         f"<b>Approval:</b> <code>{html.quote(config.gemini_approval_mode)}</code>\n"
         f"<b>Trust:</b> <code>{html.quote(trust_mode)}</code>\n"
         f"<b>Policy:</b> <code>{html.quote(policy_paths)}</code>\n"
@@ -450,6 +523,8 @@ async def command_help_handler(message: Message) -> None:
         "/sessions [фильтр|latest] — открыть один из прошлых диалогов\n"
         "/mcp — просмотреть MCP-серверы\n"
         "/skills — просмотреть навыки\n"
+        "/init — настроить личный GEMINI.md\n"
+        "/init reset — сбросить анкету и сделать новый preview\n"
         "/cancel — остановить текущий запрос\n"
         "/settings — открыть настройки отображения и режима работы\n"
         "/model — выбрать per-user модельный пресет\n"

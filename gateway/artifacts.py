@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Iterable
 
 from gateway.config import Config
 from gateway.gemini.parser import StreamEvent
+from gateway.user_environment import UserEnvironmentResolver
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +53,17 @@ _SKIP_DIRS = {
 class ArtifactManager:
     """Собирает кандидатов на отправку и находит артефакты после завершения запроса."""
 
-    def __init__(self, config: Config):
-        self.working_dir = Path(config.gemini_working_dir).expanduser().resolve()
+    def __init__(self, config: Config, user_id: int | None = None):
+        environment_resolver = UserEnvironmentResolver(config)
+        self.working_dir = (
+            Path(environment_resolver.working_dir_for(user_id)).expanduser().resolve()
+        )
         self.roots = [
-            Path(root).expanduser().resolve() for root in config.gemini_artifact_roots
+            Path(root).expanduser().resolve()
+            for root in environment_resolver.artifact_roots_for(user_id)
         ]
+        for root in self.roots:
+            root.mkdir(parents=True, exist_ok=True)
         self.stable_seconds = config.artifact_stable_seconds
         self._explicit_candidates: list[str] = []
         self._inferred_candidates: list[str] = []

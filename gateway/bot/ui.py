@@ -75,6 +75,11 @@ def build_settings_text(config: Config, render_mode: str) -> str:
         if config.gemini_allowed_mcp_server_names
         else "без allowlist"
     )
+    isolation_state = (
+        f"multi-user workspaces ({config.gateway_user_workspaces_dir})"
+        if config.gateway_experimental_multi_user_workspaces
+        else "legacy"
+    )
     return (
         "⚙️ <b>Настройки Gemini CLI</b>\n\n"
         "<b>Вывод</b>\n"
@@ -90,6 +95,7 @@ def build_settings_text(config: Config, render_mode: str) -> str:
         "<b>Модель</b>\n"
         f"<b>Модель из .env:</b> <code>{config.gemini_model}</code>\n\n"
         "<b>Runtime</b>\n"
+        f"<b>Изоляция:</b> <code>{isolation_state}</code>\n"
         f"<b>Таймаут Gemini CLI:</b> {config.gemini_cli_timeout} сек\n"
         f"<i>Кратко:</i> {get_timeout_description(config.gemini_cli_timeout)}\n"
         f"<b>Extensions:</b> <code>{extensions_state}</code>\n"

@@ -120,6 +120,8 @@ async def startup_preflight(
     state_dir = Path(config.gateway_state_dir)
     _check_state_dir(state_dir)
     runtime_state.state_dir = str(state_dir)
+    if config.gateway_experimental_multi_user_workspaces:
+        _check_state_dir(Path(config.gateway_user_workspaces_dir))
 
     runtime_state.gemini_probe = await probe_command(
         config.gemini_bin,
@@ -192,6 +194,7 @@ async def build_status_text(
         f"<b>Bot:</b> {escape(_bot_label(runtime_state))}\n"
         f"<b>Gemini:</b> {escape(gemini)}\n"
         f"<b>Node.js:</b> {escape(node)}\n"
+        f"<b>Isolation:</b> {escape(_isolation_line(config))}\n"
         f"<b>Working dir:</b> <code>{escape(config.gemini_working_dir)}</code>\n"
         f"<b>Активных запросов:</b> {session_manager.active_prompt_count()}\n"
         f"<b>Последний запрос:</b> {escape(latency)}\n"
@@ -261,6 +264,7 @@ def _runtime_snapshot(
         f"node={_probe_line(runtime_state.node_probe)}",
         f"home={runtime_state.home_dir or 'unknown'}",
         f"state_dir={runtime_state.state_dir or 'unknown'}",
+        f"isolation={_isolation_line(session_manager.config)}",
         f"webhook_url={'set' if runtime_state.webhook_url else 'empty'}",
         f"webhook_pending_updates={runtime_state.webhook_pending_updates or 0}",
         f"active_prompt_users={session_manager.active_prompt_users()}",
@@ -281,6 +285,12 @@ def _format_duration(seconds: int) -> str:
     if minutes:
         return f"{minutes}m {sec}s"
     return f"{sec}s"
+
+
+def _isolation_line(config: Config) -> str:
+    if not config.gateway_experimental_multi_user_workspaces:
+        return "legacy"
+    return f"multi-user workspaces ({config.gateway_user_workspaces_dir}), shared HOME"
 
 
 def _sanitize_error(text: str) -> str:

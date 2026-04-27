@@ -301,6 +301,14 @@ def _path_checks(config: Config) -> list[DoctorCheck]:
         _directory_check("GEMINI_WORKING_DIR", Path(config.gemini_working_dir), True),
         _directory_check("GATEWAY_STATE_DIR", Path(config.gateway_state_dir), True),
     ]
+    if config.gateway_experimental_multi_user_workspaces:
+        checks.append(
+            _directory_check(
+                "GATEWAY_USER_WORKSPACES_DIR",
+                Path(config.gateway_user_workspaces_dir),
+                True,
+            )
+        )
     for path in config.gemini_include_directories:
         checks.append(_directory_check("GEMINI_INCLUDE_DIRECTORIES", Path(path), False))
     for path in config.gemini_artifact_roots:

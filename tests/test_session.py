@@ -1,5 +1,8 @@
 import asyncio
 import json
+from pathlib import Path
+import shutil
+import uuid
 
 import pytest
 
@@ -8,6 +11,14 @@ from gateway.gemini.session import (
     SessionManager,
     parse_gemini_sessions_output,
 )
+
+
+def make_test_dir() -> Path:
+    root = Path.cwd() / ".test_runtime"
+    root.mkdir(exist_ok=True)
+    path = root / f"session-{uuid.uuid4().hex}"
+    path.mkdir()
+    return path
 
 
 class _FakeStream:
@@ -402,6 +413,62 @@ async def test_session_manager_passes_include_directories(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_manager_uses_per_user_working_dir_when_enabled(
+    monkeypatch,
+) -> None:
+    tmp_path = make_test_dir()
+    captured_kwargs = {}
+    lines = [
+        json.dumps(
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {"total_tokens": 1, "duration_ms": 10},
+            }
+        ),
+    ]
+
+    async def fake_create_subprocess_exec(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeProcess(lines)
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    try:
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(tmp_path / "legacy"),
+            gemini_artifact_roots=(str(tmp_path / "legacy"),),
+            gateway_state_dir=str(tmp_path / "state"),
+            gateway_experimental_multi_user_workspaces=True,
+            gateway_user_workspaces_dir=str(tmp_path / "users"),
+        )
+        manager = SessionManager(config)
+
+        async def on_event(_event):
+            return None
+
+        async def on_approval(_req):
+            raise AssertionError("approval request was not expected")
+
+        await manager.send_prompt(
+            prompt="test",
+            user_id=42,
+            on_event=on_event,
+            on_approval=on_approval,
+        )
+
+        assert captured_kwargs["cwd"] == str(
+            tmp_path / "users" / "tg-user-42" / "workspace"
+        )
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_session_manager_can_disable_skip_trust(monkeypatch) -> None:
     captured_args = []
 
@@ -492,7 +559,7 @@ async def test_session_manager_deletes_session_by_uuid(monkeypatch) -> None:
 async def test_session_manager_delete_falls_back_to_source_index(monkeypatch) -> None:
     captured_calls = []
 
-    async def fake_get_sessions_list():
+    async def fake_get_sessions_list(*_args, **_kwargs):
         return parse_gemini_sessions_output(
             "1. Old (2 days ago) [old-session]\n2. New (Just now) [new-session]\n"
         )

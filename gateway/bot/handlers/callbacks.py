@@ -18,6 +18,7 @@ from gateway.bot.ui import (
 )
 from gateway.config import Config
 from gateway.gemini.session import SessionManager
+from gateway.init_wizard import InitWizardStore
 from gateway.model_presets import get_model_preset_label
 from gateway.prompt_guard import PendingPromptStore
 from gateway.usage import UsageLedger
@@ -91,7 +92,7 @@ async def callback_resume_session(
 async def callback_resume_latest_session(
     callback: CallbackQuery, session_manager: SessionManager
 ) -> None:
-    sessions = await session_manager.get_sessions_list()
+    sessions = await session_manager.get_sessions_list(callback.from_user.id)
     if not sessions:
         await callback.answer("Список пуст", show_alert=True)
         return
@@ -130,12 +131,15 @@ async def callback_delete_session(
     session_manager: SessionManager,
 ) -> None:
     session_id = callback.data.split(":", maxsplit=2)[2]
-    deleted = await session_manager.delete_session_by_id(session_id)
+    deleted = await session_manager.delete_session_by_id(
+        session_id,
+        user_id=callback.from_user.id,
+    )
     if not deleted:
         await callback.answer("Сессия уже не найдена", show_alert=True)
         return
 
-    sessions = await session_manager.get_sessions_list()
+    sessions = await session_manager.get_sessions_list(callback.from_user.id)
     if not sessions:
         await callback.message.edit_text("📂 Сохранённые диалоги не найдены.")
     else:
@@ -149,7 +153,7 @@ async def callback_export_sessions(
     callback: CallbackQuery,
     session_manager: SessionManager,
 ) -> None:
-    sessions = await session_manager.get_sessions_list()
+    sessions = await session_manager.get_sessions_list(callback.from_user.id)
     if not sessions:
         await callback.answer("Список пуст", show_alert=True)
         return
@@ -190,7 +194,7 @@ async def _edit_sessions_page(
     *,
     refreshed: bool = False,
 ) -> None:
-    sessions = await session_manager.get_sessions_list()
+    sessions = await session_manager.get_sessions_list(callback.from_user.id)
     if not sessions:
         await callback.message.edit_text("📂 Сохранённые диалоги не найдены.")
         await callback.answer("Список пуст")
@@ -399,14 +403,57 @@ async def callback_prompt_cancel(
     await callback.answer("Отменено")
 
 
+# ======================== Init wizard ========================
+
+
+@router.callback_query(F.data == "init:confirm")
+async def callback_init_confirm(
+    callback: CallbackQuery,
+    init_wizard: InitWizardStore,
+) -> None:
+    try:
+        gemini_md_path = init_wizard.confirm_preview(callback.from_user.id)
+    except Exception as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "✅ Личный <code>GEMINI.md</code> записан.\n\n"
+        f"<code>{gemini_md_path}</code>\n\n"
+        "Следующие запросы будут выполняться в вашем личном workspace.",
+        reply_markup=None,
+    )
+    await callback.answer("GEMINI.md сохранён")
+
+
+@router.callback_query(F.data == "init:cancel")
+async def callback_init_cancel(
+    callback: CallbackQuery,
+    init_wizard: InitWizardStore,
+) -> None:
+    init_wizard.cancel_preview(callback.from_user.id)
+    await callback.message.edit_text(
+        "❌ Preview отменён. Текущий GEMINI.md не изменён.",
+        reply_markup=None,
+    )
+    await callback.answer("Отменено")
+
+
 # ======================== MCP & Skills ========================
 
 
 @router.callback_query(F.data.startswith("mcp_toggle:"))
 async def callback_mcp_toggle(
-    callback: CallbackQuery, session_manager: SessionManager
+    callback: CallbackQuery, session_manager: SessionManager, config: Config
 ) -> None:
     """Включение/выключение MCP сервера."""
+    if config.gateway_experimental_multi_user_workspaces:
+        await callback.answer(
+            "MCP-конфигурация общая; переключатели отключены в multi-user режиме.",
+            show_alert=True,
+        )
+        return
+
     _, name, action = callback.data.split(":")
     enable = action == "enable"
 
@@ -420,7 +467,7 @@ async def callback_mcp_toggle(
         servers = await session_manager.get_mcp_list()
         try:
             await callback.message.edit_reply_markup(
-                reply_markup=inline.get_mcp_list_keyboard(servers)
+                reply_markup=inline.get_mcp_list_keyboard(servers, allow_toggle=True)
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e).lower():
@@ -432,7 +479,7 @@ async def callback_mcp_toggle(
 @router.callback_query(F.data == "mcp_refresh")
 @router.callback_query(F.data == "mcp_reload")
 async def callback_mcp_refresh(
-    callback: CallbackQuery, session_manager: SessionManager
+    callback: CallbackQuery, session_manager: SessionManager, config: Config
 ) -> None:
     user_id = callback.from_user.id
     now = time.time()
@@ -453,7 +500,10 @@ async def callback_mcp_refresh(
     servers = await session_manager.get_mcp_list()
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=inline.get_mcp_list_keyboard(servers)
+            reply_markup=inline.get_mcp_list_keyboard(
+                servers,
+                allow_toggle=not config.gateway_experimental_multi_user_workspaces,
+            )
         )
         if callback.data == "mcp_reload":
             await callback.answer("♻️ Headless reload недоступен; список перечитан")
@@ -474,9 +524,16 @@ async def callback_mcp_refresh(
 
 @router.callback_query(F.data.startswith("skill_toggle:"))
 async def callback_skill_toggle(
-    callback: CallbackQuery, session_manager: SessionManager
+    callback: CallbackQuery, session_manager: SessionManager, config: Config
 ) -> None:
     """Включение/выключение Skill."""
+    if config.gateway_experimental_multi_user_workspaces:
+        await callback.answer(
+            "Skills-конфигурация общая; переключатели отключены в multi-user режиме.",
+            show_alert=True,
+        )
+        return
+
     _, name, action = callback.data.split(":")
     enable = action == "enable"
 
@@ -489,7 +546,7 @@ async def callback_skill_toggle(
         skills = await session_manager.get_skills_list()
         try:
             await callback.message.edit_reply_markup(
-                reply_markup=inline.get_skills_list_keyboard(skills)
+                reply_markup=inline.get_skills_list_keyboard(skills, allow_toggle=True)
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e).lower():
@@ -501,7 +558,7 @@ async def callback_skill_toggle(
 @router.callback_query(F.data == "skill_refresh")
 @router.callback_query(F.data == "skill_reload")
 async def callback_skill_refresh(
-    callback: CallbackQuery, session_manager: SessionManager
+    callback: CallbackQuery, session_manager: SessionManager, config: Config
 ) -> None:
     user_id = callback.from_user.id
     now = time.time()
@@ -522,7 +579,10 @@ async def callback_skill_refresh(
     skills = await session_manager.get_skills_list()
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=inline.get_skills_list_keyboard(skills)
+            reply_markup=inline.get_skills_list_keyboard(
+                skills,
+                allow_toggle=not config.gateway_experimental_multi_user_workspaces,
+            )
         )
         if callback.data == "skill_reload":
             await callback.answer("♻️ Headless reload недоступен; список перечитан")

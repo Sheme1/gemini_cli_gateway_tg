@@ -67,6 +67,10 @@ class Config:
 
     # === State ===
     gateway_state_dir: str = field(default_factory=lambda: str(Path(".gateway_state")))
+    gateway_experimental_multi_user_workspaces: bool = False
+    gateway_user_workspaces_dir: str = field(
+        default_factory=lambda: str(Path(".gateway_state") / "users")
+    )
 
     # === Аппрув ===
     approval_timeout: int = 120  # секунды до авто-отклонения
@@ -102,20 +106,16 @@ class Config:
         target_chat_id = target_chat_ids[0] if target_chat_ids else None
 
         # Парсинг GEMINI_SANDBOX
-        sandbox_raw = os.getenv("GEMINI_SANDBOX", "false").strip().lower()
-        sandbox = sandbox_raw in ("true", "1", "yes")
+        sandbox = _parse_bool(os.getenv("GEMINI_SANDBOX"), default=False)
 
         # Парсинг GEMINI_STREAM_DEBUG
-        stream_debug_raw = os.getenv("GEMINI_STREAM_DEBUG", "false").strip().lower()
-        stream_debug = stream_debug_raw in ("true", "1", "yes")
+        stream_debug = _parse_bool(os.getenv("GEMINI_STREAM_DEBUG"), default=False)
 
         # Парсинг GEMINI_SKIP_TRUST
-        skip_trust_raw = os.getenv("GEMINI_SKIP_TRUST", "true").strip().lower()
-        skip_trust = skip_trust_raw in ("true", "1", "yes")
+        skip_trust = _parse_bool(os.getenv("GEMINI_SKIP_TRUST"), default=True)
 
         # Парсинг GEMINI_SCREEN_READER
-        screen_reader_raw = os.getenv("GEMINI_SCREEN_READER", "false").strip().lower()
-        screen_reader = screen_reader_raw in ("true", "1", "yes")
+        screen_reader = _parse_bool(os.getenv("GEMINI_SCREEN_READER"), default=False)
 
         # Парсинг GEMINI_WORKING_DIR
         working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
@@ -154,6 +154,16 @@ class Config:
 
         state_dir_raw = os.getenv("GATEWAY_STATE_DIR", ".gateway_state").strip()
         state_dir = Path(state_dir_raw or ".gateway_state").expanduser().resolve()
+        multi_user_workspaces = _parse_bool(
+            os.getenv("GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES"),
+            default=False,
+        )
+        user_workspaces_raw = os.getenv("GATEWAY_USER_WORKSPACES_DIR", "").strip()
+        user_workspaces_dir = (
+            Path(user_workspaces_raw).expanduser().resolve()
+            if user_workspaces_raw
+            else state_dir / "users"
+        )
 
         return cls(
             telegram_bot_token=token,
@@ -271,6 +281,8 @@ class Config:
                 os.getenv("APPROVAL_TIMEOUT", str(cls.approval_timeout))
             ),
             gateway_state_dir=str(state_dir),
+            gateway_experimental_multi_user_workspaces=multi_user_workspaces,
+            gateway_user_workspaces_dir=str(user_workspaces_dir),
             log_mode=_normalize_log_mode(os.getenv("LOG_MODE", cls.log_mode)),
             log_level=_resolve_log_level(
                 os.getenv("LOG_MODE", cls.log_mode),
@@ -317,6 +329,10 @@ class Config:
             "polling_timeout": self.polling_timeout,
             "polling_concurrency_limit": self.polling_concurrency_limit,
             "gateway_state_dir": self.gateway_state_dir,
+            "gateway_experimental_multi_user_workspaces": (
+                self.gateway_experimental_multi_user_workspaces
+            ),
+            "gateway_user_workspaces_dir": self.gateway_user_workspaces_dir,
             "approval_timeout": self.approval_timeout,
             "log_mode": self.log_mode,
             "log_level": self.log_level,
@@ -408,6 +424,12 @@ def _resolve_log_level(log_mode: str | None, log_level: str | None) -> str:
         "quiet": "WARNING",
         "debug": "DEBUG",
     }.get(_normalize_log_mode(log_mode), "INFO")
+
+
+def _parse_bool(value: str | None, *, default: bool) -> bool:
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"true", "1", "yes", "on"}
 
 
 def _normalize_approval_mode(value: str | None) -> str:

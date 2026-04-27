@@ -13,6 +13,7 @@ from gateway.config import Config
 from gateway.gemini.error_classifier import classify_gemini_error
 from gateway.gemini.parser import GeminiStreamParser, StreamEvent
 from gateway.runtime import GatewayRuntimeState, PromptLatencySnapshot
+from gateway.user_environment import UserEnvironmentResolver
 
 logger = logging.getLogger(__name__)
 _SESSION_LINE_RE = re.compile(
@@ -164,6 +165,7 @@ class SessionManager:
     ):
         self.config = config
         self.runtime_state = runtime_state
+        self.user_environments = UserEnvironmentResolver(config)
         # user_id -> gemini_session_id
         self.active_sessions: dict[int, str] = {}
         self.active_prompt_processes: dict[int, asyncio.subprocess.Process] = {}
@@ -191,14 +193,22 @@ class SessionManager:
     def _gemini_executable(self) -> str:
         return shutil.which(self.config.gemini_bin) or self.config.gemini_bin
 
-    async def get_sessions_list(self) -> list[GeminiSessionInfo]:
+    def working_dir_for_user(self, user_id: int | None = None) -> str:
+        return self.user_environments.working_dir_for(user_id)
+
+    def artifact_roots_for_user(self, user_id: int | None = None) -> tuple[str, ...]:
+        return self.user_environments.artifact_roots_for(user_id)
+
+    async def get_sessions_list(
+        self, user_id: int | None = None
+    ) -> list[GeminiSessionInfo]:
         """Вернуть список сессий Gemini CLI, отсортированный от новых к старым."""
         process = await asyncio.create_subprocess_exec(
             self._gemini_executable(),
             "--list-sessions",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=self.config.gemini_working_dir,
+            cwd=self.working_dir_for_user(user_id),
         )
         stdout, stderr = await process.communicate()
         output = (
@@ -355,13 +365,15 @@ class SessionManager:
     def get_active_session(self, user_id: int) -> str | None:
         return self.active_sessions.get(user_id)
 
-    async def delete_session_by_id(self, session_id: str) -> bool:
-        deleted, output = await self._delete_session(session_id)
+    async def delete_session_by_id(
+        self, session_id: str, user_id: int | None = None
+    ) -> bool:
+        deleted, output = await self._delete_session(session_id, user_id=user_id)
         if deleted:
             self._clear_active_session_refs(session_id)
             return True
 
-        sessions = await self.get_sessions_list()
+        sessions = await self.get_sessions_list(user_id=user_id)
         target = next(
             (session for session in sessions if session.session_id == session_id),
             None,
@@ -369,7 +381,10 @@ class SessionManager:
         if target is None:
             return False
 
-        deleted, fallback_output = await self._delete_session(str(target.source_index))
+        deleted, fallback_output = await self._delete_session(
+            str(target.source_index),
+            user_id=user_id,
+        )
         if not deleted:
             combined_output = strip_ansi_codes(
                 "\n".join(part for part in (output, fallback_output) if part).strip()
@@ -381,14 +396,16 @@ class SessionManager:
         self._clear_active_session_refs(session_id)
         return True
 
-    async def _delete_session(self, session_ref: str) -> tuple[bool, str]:
+    async def _delete_session(
+        self, session_ref: str, user_id: int | None = None
+    ) -> tuple[bool, str]:
         process = await asyncio.create_subprocess_exec(
             self._gemini_executable(),
             "--delete-session",
             session_ref,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=self.config.gemini_working_dir,
+            cwd=self.working_dir_for_user(user_id),
         )
         stdout, stderr = await process.communicate()
         output = (
@@ -459,6 +476,36 @@ class SessionManager:
             except ProcessLookupError:
                 return
 
+    def _build_prompt_args(
+        self,
+        prompt: str,
+        effective_model: str,
+        *,
+        approval_mode: str | None = None,
+    ) -> list[str]:
+        args = [
+            self._gemini_executable(),
+            "-m",
+            effective_model,
+            "-o",
+            "stream-json",
+            "-p",
+            prompt,
+        ]
+        args.extend(self.config.skip_trust_flag)
+        if approval_mode:
+            args.append(f"--approval-mode={approval_mode}")
+        else:
+            args.extend(self.config.approval_mode_flag)
+        args.extend(self.config.sandbox_flag)
+        args.extend(self.config.include_directories_flag)
+        args.extend(self.config.policy_flags)
+        args.extend(self.config.admin_policy_flags)
+        args.extend(self.config.allowed_mcp_server_names_flag)
+        args.extend(self.config.extensions_flag)
+        args.extend(self.config.screen_reader_flag)
+        return args
+
     async def send_prompt(
         self,
         prompt: str,
@@ -499,33 +546,18 @@ class SessionManager:
         model: str | None = None,
     ) -> None:
         effective_model = model or self.config.gemini_model
-        args = [
-            self._gemini_executable(),
-            "-m",
-            effective_model,
-            "-o",
-            "stream-json",
-            "-p",
-            prompt,
-        ]
-        args.extend(self.config.skip_trust_flag)
-        args.extend(self.config.approval_mode_flag)
-        args.extend(self.config.sandbox_flag)
-        args.extend(self.config.include_directories_flag)
-        args.extend(self.config.policy_flags)
-        args.extend(self.config.admin_policy_flags)
-        args.extend(self.config.allowed_mcp_server_names_flag)
-        args.extend(self.config.extensions_flag)
-        args.extend(self.config.screen_reader_flag)
+        args = self._build_prompt_args(prompt, effective_model)
 
         session_id = self.active_sessions.get(user_id)
         if session_id:
             args.extend(["--resume", session_id])
 
+        working_dir = self.working_dir_for_user(user_id)
         logger.info(
-            "Spawning Gemini for user %s with model %s: %s",
+            "Spawning Gemini for user %s with model %s in %s: %s",
             user_id,
             effective_model,
+            working_dir,
             " ".join(arg if arg != prompt else "<prompt>" for arg in args),
         )
         logger.debug("Prompt length for user %s: %s chars", user_id, len(prompt))
@@ -533,7 +565,7 @@ class SessionManager:
         process_kwargs = {
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
-            "cwd": self.config.gemini_working_dir,
+            "cwd": working_dir,
         }
         if os.name == "nt":
             process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -876,6 +908,160 @@ class SessionManager:
                 first_text_ms,
                 total_ms,
             )
+
+    async def generate_text(
+        self,
+        prompt: str,
+        user_id: int,
+        *,
+        model: str | None = None,
+        approval_mode: str = "plan",
+    ) -> str:
+        """Run a non-resumed headless prompt and return assistant text."""
+        lock = self._prompt_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError(
+                "У вас уже выполняется запрос. Дождитесь ответа или используйте /cancel."
+            )
+
+        async with lock:
+            return await self._generate_text_locked(
+                prompt,
+                user_id,
+                model=model,
+                approval_mode=approval_mode,
+            )
+
+    async def _generate_text_locked(
+        self,
+        prompt: str,
+        user_id: int,
+        *,
+        model: str | None = None,
+        approval_mode: str = "plan",
+    ) -> str:
+        effective_model = model or self.config.gemini_model
+        args = self._build_prompt_args(
+            prompt,
+            effective_model,
+            approval_mode=approval_mode,
+        )
+        working_dir = self.working_dir_for_user(user_id)
+        process_kwargs = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "cwd": working_dir,
+        }
+        if os.name == "nt":
+            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            process_kwargs["start_new_session"] = True
+
+        logger.info(
+            "Spawning internal Gemini prompt for user %s with model %s in %s.",
+            user_id,
+            effective_model,
+            working_dir,
+        )
+        process = await asyncio.create_subprocess_exec(*args, **process_kwargs)
+        self.active_prompt_processes[user_id] = process
+        stderr_buffer = BoundedTextBuffer()
+        assistant_snapshot = ""
+        chunks: list[str] = []
+        seen_result = False
+        loop = asyncio.get_running_loop()
+        last_activity = loop.time()
+
+        async def read_stderr() -> None:
+            if not process.stderr:
+                return
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                text = strip_ansi_codes(line.decode("utf-8", errors="replace"))
+                stderr_buffer.append(text)
+                logger.debug("[GEMINI STDERR] %s", text.rstrip())
+
+        stderr_task = asyncio.create_task(read_stderr())
+        try:
+            while True:
+                try:
+                    line_bytes = await asyncio.wait_for(
+                        process.stdout.readline(),
+                        timeout=self.config.gemini_cli_timeout,
+                    )
+                    last_activity = loop.time()
+                except asyncio.TimeoutError as exc:
+                    await self._terminate_process(process)
+                    elapsed = int(loop.time() - last_activity)
+                    raise RuntimeError(
+                        f"Gemini CLI не отвечал {elapsed} секунд во время /init."
+                    ) from exc
+
+                if not line_bytes:
+                    break
+
+                line_text = line_bytes.decode("utf-8", errors="replace").strip()
+                if not line_text:
+                    continue
+
+                event = GeminiStreamParser.parse_line(line_text)
+                if event.event_type == "assistant_text":
+                    text = event.assistant_text
+                    if not event.message_delta:
+                        if text == assistant_snapshot:
+                            text = ""
+                        elif text.startswith(assistant_snapshot):
+                            text = text[len(assistant_snapshot) :]
+                        assistant_snapshot = event.assistant_text
+                    else:
+                        assistant_snapshot += text
+                    if text:
+                        chunks.append(text)
+                if event.is_empty_response:
+                    break
+                if event.approval_request:
+                    raise RuntimeError(
+                        _build_headless_approval_warning(event.approval_request)
+                    )
+                if event.is_done:
+                    seen_result = True
+                    break
+        finally:
+            if process.returncode is None:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    await self._terminate_process(process)
+            else:
+                await process.wait()
+
+            if stderr_task and not stderr_task.done():
+                try:
+                    await asyncio.wait_for(stderr_task, timeout=1)
+                except asyncio.TimeoutError:
+                    stderr_task.cancel()
+                except asyncio.CancelledError:
+                    pass
+
+            if self.active_prompt_processes.get(user_id) is process:
+                self.active_prompt_processes.pop(user_id, None)
+
+        cancelled_by_gateway = id(process) in self._cancelled_processes
+        self._cancelled_processes.discard(id(process))
+        if cancelled_by_gateway:
+            raise RuntimeError("Генерация GEMINI.md остановлена.")
+
+        if process.returncode and process.returncode != 0:
+            raise RuntimeError(
+                _build_process_error(process.returncode, stderr_buffer.text())
+            )
+
+        text = "".join(chunks).strip()
+        if not text and not seen_result:
+            raise RuntimeError(_build_empty_stream_warning(stderr_buffer.text()))
+        return text
 
     async def answer_approval(self, answer: str) -> None:
         # Заглушка. Headless режим не поддерживает интерактивный ввод.
