@@ -109,7 +109,7 @@ python -m gateway.main --doctor-json
 | Переменная | Обязательна | Как писать и для чего нужна |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Да | Токен Telegram Bot API от BotFather, например `123456789:AA...`. В логах маскируется. |
-| `TARGET_CHAT_ID` | Нет | Числовой id чата или пользователя. Пустое значение разрешает все чаты, которые могут писать боту. Для личного шлюза лучше указать свой id. |
+| `TARGET_CHAT_ID` | Нет | Числовой Telegram chat/user id или allowlist через запятую. Примеры: `TARGET_CHAT_ID=111111111` или `TARGET_CHAT_ID=111111111,222222222`. Пустое значение разрешает все чаты, которые могут писать боту. У групп и супергрупп chat id может быть отрицательным. |
 | `GEMINI_BIN` | Нет | Имя или полный путь к Gemini CLI. Если `gemini` есть в `PATH`, оставьте `gemini`; для systemd можно указать полный путь вроде `/home/user/.npm-global/bin/gemini`. |
 | `GEMINI_MODEL` | Нет | Модель или alias Gemini CLI для `gemini -m`: `auto`, `pro`, `flash`, `flash-lite` или конкретный id модели. По умолчанию `auto`. |
 | `GEMINI_TARGET_VERSION` | Нет | Ожидаемая версия Gemini CLI для `doctor`. По умолчанию `0.39.1`; несовпадение даёт warning, но не блокирует запуск. |
@@ -198,6 +198,35 @@ sudo systemctl status telegram-gateway
 sudo systemctl restart telegram-gateway
 sudo journalctl -u telegram-gateway -f
 ```
+
+### Обновление существующего systemd-деплоя
+
+Быстрый путь:
+
+```bash
+chmod +x update.sh
+./update.sh
+```
+
+Скрипт обновления выполняет `git pull --ff-only`, ставит Python-зависимости в
+`.venv`, запускает `python -m gateway.main --doctor`, проверяет, отличается ли
+установленный systemd unit от текущего отрендеренного шаблона, и перезапускает
+`telegram-gateway`.
+
+Ручной путь:
+
+```bash
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m gateway.main --doctor
+sudo systemctl restart telegram-gateway
+sudo systemctl status telegram-gateway --no-pager -l
+```
+
+Для обычных изменений Python-кода достаточно
+`sudo systemctl restart telegram-gateway`. `sudo systemctl daemon-reload` нужен
+только если изменился установленный unit-файл или если вы заново запускаете
+`./install.sh`, который сам выполняет daemon reload.
 
 ## Docker
 

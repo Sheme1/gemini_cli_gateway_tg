@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import subprocess
 from types import SimpleNamespace
 import uuid
 
@@ -100,6 +101,49 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
+@pytest.mark.parametrize(
+    ("raw_chat_id", "expected_first", "expected_ids"),
+    [
+        ("", None, ()),
+        ("111111111", 111111111, (111111111,)),
+        ("111111111,222222222", 111111111, (111111111, 222222222)),
+        ("111111111,-1002222222222", 111111111, (111111111, -1002222222222)),
+    ],
+)
+def test_config_parses_target_chat_id_allowlist(
+    monkeypatch,
+    raw_chat_id: str,
+    expected_first: int | None,
+    expected_ids: tuple[int, ...],
+) -> None:
+    tmp_path = make_test_dir()
+    try:
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:secret-token")
+        monkeypatch.setenv("GEMINI_WORKING_DIR", str(tmp_path))
+        monkeypatch.setenv("TARGET_CHAT_ID", raw_chat_id)
+
+        config = Config.from_env()
+
+        assert config.target_chat_id == expected_first
+        assert config.target_chat_ids == expected_ids
+        assert config.allowed_target_chat_ids == expected_ids
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_config_rejects_invalid_target_chat_id(monkeypatch) -> None:
+    tmp_path = make_test_dir()
+    try:
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:secret-token")
+        monkeypatch.setenv("GEMINI_WORKING_DIR", str(tmp_path))
+        monkeypatch.setenv("TARGET_CHAT_ID", "111111111,not-a-number")
+
+        with pytest.raises(ValueError, match="TARGET_CHAT_ID.*not-a-number"):
+            Config.from_env()
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
 def test_systemd_unit_contains_expected_restart_directives() -> None:
     unit = Path("telegram-gateway.service").read_text(encoding="utf-8")
 
@@ -110,6 +154,49 @@ def test_systemd_unit_contains_expected_restart_directives() -> None:
     assert "TimeoutStopSec=30s" in unit
     assert "Environment=HOME=__HOME_DIR__" in unit
     assert "Environment=PATH=__SERVICE_PATH__" in unit
+
+
+def test_update_script_contains_safe_update_flow() -> None:
+    script = Path("update.sh").read_text(encoding="utf-8")
+
+    assert 'git -C "${PROJECT_DIR}" pull --ff-only' in script
+    assert "-m pip install -r" in script
+    assert "-m gateway.main --doctor" in script
+    assert "systemctl restart" in script
+    assert "daemon-reload" in script
+    assert "cmp -s" in script
+
+
+def test_update_script_has_valid_bash_syntax() -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available on this host")
+
+    result = subprocess.run(
+        [bash, "-n", "update.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    bash_output = (result.stdout + result.stderr).replace("\x00", "")
+    if "HCS_E_HYPERV_NOT_INSTALLED" in bash_output or "WSL" in bash_output:
+        pytest.skip("bash resolves to WSL launcher, but WSL is unavailable")
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_readmes_document_multi_chat_id_and_update_flow() -> None:
+    readme_en = Path("README.md").read_text(encoding="utf-8")
+    readme_ru = Path("README.ru.md").read_text(encoding="utf-8")
+    env_example = Path(".env.example").read_text(encoding="utf-8")
+
+    for text in (readme_en, readme_ru, env_example):
+        assert "TARGET_CHAT_ID=111111111,222222222" in text
+    for text in (readme_en, readme_ru):
+        assert "update.sh" in text
+        assert "git pull --ff-only" in text
+        assert "daemon-reload" in text
 
 
 @pytest.mark.asyncio

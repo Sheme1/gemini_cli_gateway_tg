@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
@@ -10,9 +11,20 @@ class AuthMiddleware(BaseMiddleware):
     Блокирует сообщения от неавторизованных чатов.
     """
 
-    def __init__(self, target_chat_id: int | None = None):
+    def __init__(
+        self,
+        target_chat_id: int | None = None,
+        target_chat_ids: Iterable[int] | None = None,
+    ):
         super().__init__()
-        self.target_chat_id = target_chat_id
+        if target_chat_ids is not None:
+            self.target_chat_ids = frozenset(
+                int(chat_id) for chat_id in target_chat_ids
+            )
+        elif target_chat_id is not None:
+            self.target_chat_ids = frozenset({target_chat_id})
+        else:
+            self.target_chat_ids = frozenset()
 
     async def __call__(
         self,
@@ -22,17 +34,17 @@ class AuthMiddleware(BaseMiddleware):
     ) -> Any:
 
         # Разрешаем доступ если TARGET_CHAT_ID не задан
-        if self.target_chat_id is None:
+        if not self.target_chat_ids:
             return await handler(event, data)
 
         # Проверяем откуда пришло событие
         if isinstance(event, Message):
-            if event.chat.id != self.target_chat_id:
+            if event.chat.id not in self.target_chat_ids:
                 # Опционально: можно логировать или отправлять предупреждение
                 # await event.answer("⚠️ Доступ запрещен. Бот привязан к другому чату.")
                 return
         elif isinstance(event, CallbackQuery) and event.message:
-            if event.message.chat.id != self.target_chat_id:
+            if event.message.chat.id not in self.target_chat_ids:
                 return
 
         return await handler(event, data)

@@ -19,6 +19,7 @@ class Config:
     # === Telegram ===
     telegram_bot_token: str
     target_chat_id: Optional[int] = None
+    target_chat_ids: tuple[int, ...] = field(default_factory=tuple)
 
     # === Gemini CLI ===
     gemini_model: str = "auto"
@@ -97,8 +98,8 @@ class Config:
             token = "__missing_telegram_bot_token__"
 
         # Парсинг TARGET_CHAT_ID
-        chat_id_raw = os.getenv("TARGET_CHAT_ID", "").strip()
-        target_chat_id = int(chat_id_raw) if chat_id_raw else None
+        target_chat_ids = _parse_target_chat_ids(os.getenv("TARGET_CHAT_ID", ""))
+        target_chat_id = target_chat_ids[0] if target_chat_ids else None
 
         # Парсинг GEMINI_SANDBOX
         sandbox_raw = os.getenv("GEMINI_SANDBOX", "false").strip().lower()
@@ -157,6 +158,7 @@ class Config:
         return cls(
             telegram_bot_token=token,
             target_chat_id=target_chat_id,
+            target_chat_ids=target_chat_ids,
             gemini_model=os.getenv("GEMINI_MODEL", cls.gemini_model),
             gemini_target_version=os.getenv(
                 "GEMINI_TARGET_VERSION", cls.gemini_target_version
@@ -281,6 +283,7 @@ class Config:
         return {
             "telegram_bot_token": _mask_secret(self.telegram_bot_token),
             "target_chat_id": self.target_chat_id,
+            "target_chat_ids": self.allowed_target_chat_ids,
             "gemini_model": self.gemini_model,
             "gemini_target_version": self.gemini_target_version,
             "gemini_bin": self.gemini_bin,
@@ -327,6 +330,15 @@ class Config:
         if mode in ("default", "auto_edit", "yolo", "plan"):
             return [f"--approval-mode={mode}"]
         return []
+
+    @property
+    def allowed_target_chat_ids(self) -> tuple[int, ...]:
+        """Нормализованный allowlist Telegram chat/user id."""
+        if self.target_chat_ids:
+            return self.target_chat_ids
+        if self.target_chat_id is not None:
+            return (self.target_chat_id,)
+        return ()
 
     @property
     def sandbox_flag(self) -> list[str]:
@@ -403,6 +415,31 @@ def _normalize_approval_mode(value: str | None) -> str:
     if normalized in {"default", "auto_edit", "yolo", "plan"}:
         return normalized
     return "yolo"
+
+
+def _parse_target_chat_ids(raw_value: str | None) -> tuple[int, ...]:
+    raw = (raw_value or "").strip()
+    if not raw:
+        return ()
+
+    values: list[int] = []
+    seen: set[int] = set()
+    for raw_item in raw.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            chat_id = int(item)
+        except ValueError as exc:
+            raise ValueError(
+                "TARGET_CHAT_ID содержит некорректный Telegram chat/user id "
+                f"'{item}'. Используйте число или список через запятую, "
+                "например TARGET_CHAT_ID=111111111,222222222."
+            ) from exc
+        if chat_id not in seen:
+            seen.add(chat_id)
+            values.append(chat_id)
+    return tuple(values)
 
 
 def _parse_csv_values(raw_value: str) -> list[str]:

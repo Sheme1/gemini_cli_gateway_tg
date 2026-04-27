@@ -126,7 +126,7 @@ async def main(
     )
 
     # Регистрация middlewares
-    auth_middleware = AuthMiddleware(target_chat_id=config.target_chat_id)
+    auth_middleware = AuthMiddleware(target_chat_ids=config.allowed_target_chat_ids)
     dp.message.middleware(auth_middleware)
     dp.callback_query.middleware(auth_middleware)
 

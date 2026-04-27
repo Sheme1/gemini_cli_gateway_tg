@@ -109,7 +109,7 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | Variable | Required | How to write it |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Yes | Telegram Bot API token from BotFather, for example `123456789:AA...`. It is redacted in logs. |
-| `TARGET_CHAT_ID` | No | Numeric chat/user id. Leave empty to allow every chat that can reach the bot. Set it for a private single-user gateway. |
+| `TARGET_CHAT_ID` | No | Numeric Telegram chat/user id, or a comma-separated allowlist. Examples: `TARGET_CHAT_ID=111111111` or `TARGET_CHAT_ID=111111111,222222222`. Leave empty to allow every chat that can reach the bot. Groups and supergroups can have negative chat id values. |
 | `GEMINI_BIN` | No | Gemini executable name or absolute path. Use `gemini` when it is available through `PATH`; use `/home/user/.npm-global/bin/gemini` for systemd if needed. |
 | `GEMINI_MODEL` | No | Model or Gemini CLI alias passed to `gemini -m`, for example `auto`, `pro`, `flash`, `flash-lite`, or a concrete model id. Defaults to `auto`. |
 | `GEMINI_TARGET_VERSION` | No | Expected Gemini CLI version for `doctor`. Defaults to `0.39.1`; mismatch is a warning, not a startup blocker. |
@@ -198,6 +198,34 @@ sudo systemctl status telegram-gateway
 sudo systemctl restart telegram-gateway
 sudo journalctl -u telegram-gateway -f
 ```
+
+### Update an existing systemd deployment
+
+Fast path:
+
+```bash
+chmod +x update.sh
+./update.sh
+```
+
+The update script runs `git pull --ff-only`, installs Python dependencies into
+`.venv`, runs `python -m gateway.main --doctor`, checks whether the installed
+systemd unit differs from the current rendered template, and restarts
+`telegram-gateway`.
+
+Manual path:
+
+```bash
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m gateway.main --doctor
+sudo systemctl restart telegram-gateway
+sudo systemctl status telegram-gateway --no-pager -l
+```
+
+For ordinary Python code changes, `sudo systemctl restart telegram-gateway` is
+enough. Run `sudo systemctl daemon-reload` only when the installed unit file
+changes, or rerun `./install.sh`, which performs daemon reload for you.
 
 ## Docker
 
