@@ -326,6 +326,36 @@ async def test_doctor_warns_on_gemini_version_mismatch(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_doctor_errors_on_invalid_telegram_token(monkeypatch) -> None:
+    tmp_path = make_test_dir()
+    try:
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "8771...Gb5Y")
+        monkeypatch.setenv("GEMINI_WORKING_DIR", str(tmp_path))
+        monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
+
+        async def fake_probe(command: str, *_args, cwd=None, limit=None):
+            del cwd, limit
+            version = "0.39.1" if "gemini" in command else "v22.0.0"
+            return CommandProbe(
+                command=command, path=f"/bin/{command}", version=version
+            )
+
+        monkeypatch.setattr("gateway.doctor.probe_command", fake_probe)
+
+        report = await run_doctor()
+
+        token_check = next(
+            check for check in report.checks if check.name == "TELEGRAM_BOT_TOKEN"
+        )
+        assert token_check.status == "error"
+        assert "Token is invalid" in token_check.details
+        assert "BotFather" in token_check.hint
+        assert report.has_errors
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_doctor_warns_when_headless_trust_is_disabled(monkeypatch) -> None:
     tmp_path = make_test_dir()
     try:

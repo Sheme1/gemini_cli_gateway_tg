@@ -10,6 +10,8 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from aiogram.utils.token import TokenValidationError, validate_token
+
 from gateway.config import Config
 from gateway.runtime import probe_command
 
@@ -83,6 +85,8 @@ async def run_doctor() -> DoctorReport:
                 hint="Gateway не сможет стартовать без токена, но local doctor продолжает проверку.",
             )
         )
+    else:
+        checks.append(_telegram_token_check(config.telegram_bot_token))
 
     checks.append(_headless_trust_check(config))
     checks.extend(_python_import_checks())
@@ -142,6 +146,27 @@ def _python_import_checks() -> list[DoctorCheck]:
             )
         )
     return checks
+
+
+def _telegram_token_check(token: str) -> DoctorCheck:
+    try:
+        validate_token(token)
+    except TokenValidationError as exc:
+        return DoctorCheck(
+            name="TELEGRAM_BOT_TOKEN",
+            status="error",
+            details=str(exc),
+            hint=(
+                "Проверьте TELEGRAM_BOT_TOKEN в .env. Нужен полный токен от "
+                "BotFather в формате 123456789:AA... без пробелов, кавычек "
+                "и маскировки вроде 8771...Gb5Y."
+            ),
+        )
+    return DoctorCheck(
+        name="TELEGRAM_BOT_TOKEN",
+        status="ok",
+        details="формат токена валиден",
+    )
 
 
 def _headless_trust_check(config: Config) -> DoctorCheck:
