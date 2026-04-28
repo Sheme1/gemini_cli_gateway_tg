@@ -133,7 +133,7 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `ARTIFACT_WATCH_INTERVAL` | No | Seconds between artifact watcher checks while a prompt is running. |
 | `ARTIFACT_STABLE_SECONDS` | No | File must remain unchanged this long before it is sent to Telegram. |
 | `GEMINI_API_KEY` | No | Gemini API key for voice transcription. Text prompts use Gemini CLI auth. |
-| `STREAM_UPDATE_INTERVAL` | No | Minimum seconds between normal Telegram edit updates after the first answer chunk. |
+| `STREAM_UPDATE_INTERVAL` | No | Minimum seconds between normal Telegram edit updates after the first answer chunk. Live updates are plain text; the final answer is rendered as safe Telegram HTML. |
 | `STREAM_MIN_UPDATE_CHARS` | No | Minimum buffered character delta before another streamed edit is scheduled. |
 | `STREAM_RETRY_MAX_DELAY` | No | Maximum seconds to sleep when Telegram asks the bot to retry later. |
 | `PROMPT_WARN_CHARS` | No | Prompt length that triggers an inline confirmation before sending to Gemini. |
@@ -313,9 +313,12 @@ Telegram page. Deletion uses `gemini --delete-session <session_uuid>` first, the
 falls back to the listed index if needed. Gemini CLI does not expose a structured
 JSON session list in 0.39.1, so this parser is covered by tests.
 
-The first real answer chunk is edited into Telegram immediately. Later edits are
-coalesced by `STREAM_UPDATE_INTERVAL` and `STREAM_MIN_UPDATE_CHARS` to avoid
-Telegram flood limits.
+The first real answer chunk is edited into Telegram immediately as plain text
+with `parse_mode=None`, so partial Markdown/HTML cannot break streamed edits.
+Later edits are coalesced by `STREAM_UPDATE_INTERVAL` and
+`STREAM_MIN_UPDATE_CHARS` to avoid Telegram flood limits. When the stream is
+done, the gateway normalizes the final text and renders a safe Telegram HTML
+version; if Telegram rejects the HTML, it falls back to plain text.
 
 Model selection is stored per Telegram user in `GATEWAY_STATE_DIR`; the `.env`
 model is the fallback. The preferred presets use Gemini CLI aliases (`auto`,
@@ -334,7 +337,8 @@ stay compatible.
 This is where the MVP still feels like an MVP:
 
 - interactive approval is not continued from Telegram in headless mode; use approval mode or policy rules
-- Gemini CLI output formats can change between releases
+- Gemini CLI output formats can change between releases; enable
+  `GEMINI_STREAM_DEBUG=true` temporarily if whitespace or formatting looks wrong
 - experimental multi-user workspaces isolate project files, not the shared Gemini CLI auth/HOME
 - Linux + `systemd` is the main target; other deployment modes may need local tweaks
 - some users will prefer keeping a fork for their own workflow, auth model, or deployment setup

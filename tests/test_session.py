@@ -395,6 +395,78 @@ async def test_session_manager_deduplicates_full_message_snapshots(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_session_manager_preserves_delta_whitespace(monkeypatch) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "Я обновляю",
+                "delta": True,
+            },
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": " структуру",
+                "delta": True,
+            },
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": " ваших",
+                "delta": True,
+            },
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {"total_tokens": 12, "duration_ms": 100},
+            }
+        ),
+    ]
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return _FakeProcess(lines)
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+    )
+    manager = SessionManager(config)
+    chunks = []
+
+    async def on_event(event):
+        if event.event_type == "assistant_text":
+            chunks.append(event.assistant_text)
+
+    async def on_approval(_req):
+        raise AssertionError("approval request was not expected")
+
+    await manager.send_prompt(
+        prompt="test",
+        user_id=123,
+        on_event=on_event,
+        on_approval=on_approval,
+    )
+
+    assert "".join(chunks) == "Я обновляю структуру ваших"
+
+
+@pytest.mark.asyncio
 async def test_session_manager_passes_include_directories(monkeypatch) -> None:
     captured_args = []
     captured_kwargs = {}

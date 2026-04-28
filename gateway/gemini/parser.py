@@ -42,6 +42,14 @@ _LIKELY_ARTIFACT_EXTENSIONS = {
     ".xlsx",
     ".zip",
 }
+_THOUGHT_FLAG_KEYS = {
+    "thought",
+    "is_thought",
+    "isThought",
+    "thinking",
+    "is_thinking",
+    "isThinking",
+}
 
 
 @dataclass
@@ -223,6 +231,21 @@ def _extract_file_candidates(text: str) -> list[str]:
     return _dedupe(candidates)
 
 
+def _is_thought_payload(data: dict[str, Any]) -> bool:
+    if _stringify_payload(data.get("type")).lower() in {"thought", "thinking"}:
+        return True
+
+    for key in _THOUGHT_FLAG_KEYS:
+        if data.get(key) is True:
+            return True
+
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        return any(metadata.get(key) is True for key in _THOUGHT_FLAG_KEYS)
+
+    return False
+
+
 class GeminiStreamParser:
     """Парсер для --output-format stream-json Gemini CLI."""
 
@@ -258,15 +281,18 @@ class GeminiStreamParser:
 
         if raw_type == "message":
             role = data.get("role", "")
-            content = _stringify_payload(data.get("content")).strip()
-            if role != "assistant" or not content:
+            if role != "assistant" or _is_thought_payload(data):
+                return StreamEvent()
+
+            content = _stringify_payload(data.get("content"))
+            if content == "":
                 return StreamEvent()
 
             direct_candidates = [
                 _normalize_path_candidate(match)
                 for match in _SEND_FILE_RE.findall(content)
             ]
-            content = _SEND_FILE_RE.sub("", content).strip()
+            content = _SEND_FILE_RE.sub("", content)
             inferred_candidates = _extract_file_candidates(content)
 
             return StreamEvent(

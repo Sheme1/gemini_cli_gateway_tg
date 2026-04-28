@@ -39,14 +39,23 @@ def test_settings_text_is_fully_russian() -> None:
 
 def test_stream_editor_splits_text_without_breaking_beginning() -> None:
     editor = StreamEditor(bot=None, chat_id=1, max_length=40)  # type: ignore[arg-type]
+    text = "Первая строка.\nВторая строка.\nТретья строка."
 
-    chunk, remainder = editor._split_text(
-        "Первая строка.\nВторая строка.\nТретья строка.",
-        25,
-    )
+    chunk, remainder = editor._split_text(text, 25)
 
+    assert chunk + remainder == text
     assert chunk.startswith("Первая строка")
     assert remainder.startswith("Вторая")
+
+
+def test_stream_editor_splits_text_without_losing_spaces() -> None:
+    editor = StreamEditor(bot=None, chat_id=1, max_length=30)  # type: ignore[arg-type]
+    text = "Я обновляю структуру ваших личных инструкций."
+
+    chunk, remainder = editor._split_text(text, 20)
+
+    assert chunk + remainder == text
+    assert "структуру ваших" in chunk + remainder
 
 
 class _FakeBot:
@@ -84,6 +93,29 @@ class _FakeBot:
         )
         if self.failures:
             raise self.failures.pop(0)
+
+
+class _HtmlRejectingBot(_FakeBot):
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode=None,
+    ) -> None:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": parse_mode,
+            }
+        )
+        if parse_mode == "HTML":
+            raise TelegramBadRequest(
+                method=None,  # type: ignore[arg-type]
+                message="Bad Request: can't parse entities",
+            )
 
 
 @pytest.mark.asyncio
@@ -173,6 +205,34 @@ async def test_stream_editor_retries_after_telegram_rate_limit() -> None:
 
     assert len(bot.edits) == 2
     assert bot.edits[-1]["text"] == "Ответ"
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_finalizes_markdown_as_safe_html() -> None:
+    bot = _FakeBot()
+    editor = StreamEditor(bot=bot, chat_id=1, interval=0)
+
+    await editor.initialize("loading")
+    await editor.append_text("**Важно** <tag>\n- пункт")
+    await editor.flush()
+
+    assert bot.edits[-1]["parse_mode"] == "HTML"
+    assert "<b>Важно</b> &lt;tag&gt;" in bot.edits[-1]["text"]
+    assert "• пункт" in bot.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_falls_back_to_plain_text_after_html_error() -> None:
+    bot = _HtmlRejectingBot()
+    editor = StreamEditor(bot=bot, chat_id=1, interval=0)
+
+    await editor.initialize("loading")
+    await editor.append_text("**Важно** <tag>")
+    await editor.flush()
+
+    assert any(edit["parse_mode"] == "HTML" for edit in bot.edits)
+    assert bot.edits[-1]["parse_mode"] is None
+    assert bot.edits[-1]["text"] == "**Важно** <tag>"
 
 
 def test_user_settings_store_persists_render_mode() -> None:

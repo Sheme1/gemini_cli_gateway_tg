@@ -10,9 +10,9 @@ RENDER_MODE_LABELS = {
 }
 
 RENDER_MODE_DESCRIPTIONS = {
-    "compact": "Показывает только итоговый ответ и важные статусы.",
+    "compact": "Показывает итоговый ответ и минимум статусов инструментов.",
     "summary": "Показывает ответ и короткие статусы инструментов.",
-    "detailed": "Показывает ответ и расширенные технические детали.",
+    "detailed": "Показывает ответ и расширенные технические детали инструментов.",
 }
 
 APPROVAL_MODE_LABELS = {
@@ -85,6 +85,7 @@ def build_settings_text(config: Config, render_mode: str) -> str:
         "<b>Вывод</b>\n"
         f"<b>Режим отображения:</b> {get_render_mode_label(render_mode)}\n"
         f"<i>Кратко:</i> {get_render_mode_description(render_mode)}\n\n"
+        "<b>Формат Telegram:</b> live stream без разметки, финал в безопасном HTML\n\n"
         "<b>Безопасность</b>\n"
         f"<b>Режим подтверждений:</b> {get_approval_mode_label(config.gemini_approval_mode)}\n"
         f"<i>Кратко:</i> {get_approval_mode_description(config.gemini_approval_mode)}\n\n"

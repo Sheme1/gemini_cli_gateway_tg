@@ -745,7 +745,7 @@ class SessionManager:
                     # EOF — процесс завершился
                     break
 
-                line_text = line_bytes.decode("utf-8").strip()
+                line_text = line_bytes.decode("utf-8").rstrip("\r\n")
                 if not line_text:
                     continue
 
@@ -1073,7 +1073,7 @@ class SessionManager:
                 if not line_bytes:
                     break
 
-                line_text = line_bytes.decode("utf-8", errors="replace").strip()
+                line_text = line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
                 if not line_text:
                     continue
 

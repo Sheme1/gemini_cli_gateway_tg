@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
+from gateway.telegram_formatting import render_telegram_html
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -61,6 +63,8 @@ class StreamEditor:
         self._first_chunk = True
         self._has_answer_text = False
         self._loading_task: Optional[asyncio.Task] = None
+        self._message_order: list[int] = []
+        self._message_texts: dict[int, str] = {}
 
     async def _loading_animation(self, chat_id: int, message_id: int) -> None:
         stages = [
@@ -107,6 +111,7 @@ class StreamEditor:
             parse_mode=None,
         )
         self.current_message_id = msg.message_id
+        self._remember_message(msg.message_id, initial_text)
         self.last_sent_text = initial_text
         self._last_display_text = initial_text
         self.text_buffer = ""
@@ -119,6 +124,7 @@ class StreamEditor:
 
     def attach_to_message(self, message_id: int, initial_text: str = "") -> None:
         self.current_message_id = message_id
+        self._remember_message(message_id, initial_text)
         self.last_sent_text = initial_text
         self._last_display_text = initial_text
         self.text_buffer = ""
@@ -185,7 +191,9 @@ class StreamEditor:
             parse_mode=None,
         )
         self.current_message_id = msg.message_id
+        self._remember_message(msg.message_id, "")
         self.last_sent_text = ""
+        self._last_display_text = "…"
 
     async def _throttled_update(self) -> None:
         await asyncio.sleep(self.interval)
@@ -213,8 +221,16 @@ class StreamEditor:
         if self._loading_task and not self._loading_task.done():
             self._loading_task.cancel()
 
-    async def _raw_edit(self, text: str) -> bool:
-        if not self.current_message_id:
+    async def _raw_edit(
+        self,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        message_id: int | None = None,
+        update_segment: bool = True,
+    ) -> bool:
+        target_message_id = message_id or self.current_message_id
+        if not target_message_id:
             return False
 
         network_delay = 1.0
@@ -222,11 +238,14 @@ class StreamEditor:
             try:
                 await self.bot.edit_message_text(
                     chat_id=self.chat_id,
-                    message_id=self.current_message_id,
+                    message_id=target_message_id,
                     text=text or "…",
-                    parse_mode=None,
+                    parse_mode=parse_mode,
                 )
-                self._last_display_text = text or "…"
+                if target_message_id == self.current_message_id:
+                    self._last_display_text = text or "…"
+                if update_segment:
+                    self._set_message_text(target_message_id, text or "…")
                 return True
             except TelegramRetryAfter as exc:
                 retry_after = float(getattr(exc, "retry_after", 1) or 1)
@@ -238,9 +257,15 @@ class StreamEditor:
             except TelegramBadRequest as exc:
                 message = str(exc).lower()
                 if "message is not modified" in message:
-                    self._last_display_text = text or "…"
+                    if target_message_id == self.current_message_id:
+                        self._last_display_text = text or "…"
+                    if update_segment:
+                        self._set_message_text(target_message_id, text or "…")
                     return True
-                if self._should_fallback_to_new_message(message):
+                if (
+                    target_message_id == self.current_message_id
+                    and self._should_fallback_to_new_message(message)
+                ):
                     return await self._send_replacement_message(text)
                 logger.warning("Error editing message: %s", exc)
                 return False
@@ -257,6 +282,7 @@ class StreamEditor:
             logger.warning("Error sending replacement message: %s", exc)
             return False
         self.current_message_id = msg.message_id
+        self._remember_message(msg.message_id, text or "…")
         self._last_display_text = text or "…"
         return True
 
@@ -284,6 +310,9 @@ class StreamEditor:
         if final_text != self._last_display_text:
             await self._raw_edit(final_text)
 
+        if self._has_answer_text:
+            await self._finalize_html_formatting()
+
         self.is_flushing = False
 
     def _split_text(self, text: str, limit: int) -> tuple[str, str]:
@@ -291,8 +320,8 @@ class StreamEditor:
             return text, ""
 
         split_at = self._find_split_index(text, limit)
-        chunk = text[:split_at].rstrip()
-        remainder = text[split_at:].lstrip()
+        chunk = text[:split_at]
+        remainder = text[split_at:]
 
         if not chunk:
             chunk = text[:limit]
@@ -308,7 +337,10 @@ class StreamEditor:
         for separator in ("\n\n", "\n", ". ", " "):
             index = search_space.rfind(separator)
             if index >= minimum:
-                return index + (0 if separator == " " else len(separator))
+                split_at = index + len(separator)
+                if split_at <= limit:
+                    return split_at
+                return index
 
         return limit
 
@@ -331,3 +363,35 @@ class StreamEditor:
                 "message identifier is not specified",
             )
         )
+
+    def _remember_message(self, message_id: int, text: str) -> None:
+        if message_id not in self._message_texts:
+            self._message_order.append(message_id)
+        self._message_texts[message_id] = text
+
+    def _set_message_text(self, message_id: int, text: str) -> None:
+        self._remember_message(message_id, text)
+
+    async def _finalize_html_formatting(self) -> None:
+        for message_id in list(self._message_order):
+            plain_text = self._message_texts.get(message_id, "")
+            if not plain_text or plain_text == "…":
+                continue
+
+            rendered = render_telegram_html(plain_text)
+            if not rendered.changed:
+                continue
+
+            ok = await self._raw_edit(
+                rendered.html_text,
+                parse_mode="HTML",
+                message_id=message_id,
+                update_segment=False,
+            )
+            if not ok:
+                await self._raw_edit(
+                    rendered.plain_text,
+                    parse_mode=None,
+                    message_id=message_id,
+                    update_segment=False,
+                )

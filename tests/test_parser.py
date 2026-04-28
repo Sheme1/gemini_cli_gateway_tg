@@ -83,6 +83,40 @@ def test_parser_tracks_message_delta_flag() -> None:
     assert event.message_delta is True
 
 
+def test_parser_preserves_message_delta_whitespace() -> None:
+    chunks = ["Я обновляю", " структуру", " ваших", " "]
+
+    rendered = "".join(
+        GeminiStreamParser.parse_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": chunk,
+                    "delta": True,
+                },
+                ensure_ascii=False,
+            )
+        ).assistant_text
+        for chunk in chunks
+    )
+
+    assert rendered == "Я обновляю структуру ваших "
+
+
+def test_parser_skips_structured_thought_messages() -> None:
+    payload = {
+        "type": "message",
+        "role": "assistant",
+        "content": "internal reasoning",
+        "thought": True,
+    }
+
+    event = GeminiStreamParser.parse_line(json.dumps(payload))
+
+    assert event.event_type == ""
+
+
 def test_parser_marks_empty_result() -> None:
     payload = {
         "status": "success",
