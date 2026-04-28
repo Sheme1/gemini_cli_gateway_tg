@@ -58,6 +58,7 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         monkeypatch.setenv("LOG_MODE", "debug")
         monkeypatch.delenv("LOG_LEVEL", raising=False)
         monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("GATEWAY_SESSION_AUTO_RESUME_LATEST", "false")
         monkeypatch.setenv("GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES", "true")
         monkeypatch.setenv("GATEWAY_USER_WORKSPACES_DIR", str(tmp_path / "users"))
 
@@ -99,12 +100,14 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.log_mode == "debug"
         assert config.log_level == "DEBUG"
         assert config.gateway_state_dir == str((tmp_path / "state").resolve())
+        assert config.gateway_session_auto_resume_latest is False
         assert config.gateway_experimental_multi_user_workspaces is True
         assert config.gateway_user_workspaces_dir == str((tmp_path / "users").resolve())
         assert config.redacted_dict()["gemini_skip_trust"] is False
         assert (
             config.redacted_dict()["gateway_experimental_multi_user_workspaces"] is True
         )
+        assert config.redacted_dict()["gateway_session_auto_resume_latest"] is False
         assert config.redacted_dict()["gemini_stream_reader_limit_bytes"] == 123456
         assert config.redacted_dict()["telegram_bot_token"] == "1234...oken"
     finally:

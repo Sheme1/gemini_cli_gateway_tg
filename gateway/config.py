@@ -72,6 +72,7 @@ class Config:
     gateway_user_workspaces_dir: str = field(
         default_factory=lambda: str(Path(".gateway_state") / "users")
     )
+    gateway_session_auto_resume_latest: bool = True
 
     # === Аппрув ===
     approval_timeout: int = 120  # секунды до авто-отклонения
@@ -107,6 +108,10 @@ class Config:
         )
         artifact_roots = _parse_artifact_roots(working_dir)
         state_dir, multi_user_workspaces, user_workspaces_dir = _parse_state_paths()
+        session_auto_resume_latest = _parse_bool(
+            os.getenv("GATEWAY_SESSION_AUTO_RESUME_LATEST"),
+            default=cls.gateway_session_auto_resume_latest,
+        )
 
         return cls(
             telegram_bot_token=token,
@@ -232,6 +237,7 @@ class Config:
             gateway_state_dir=str(state_dir),
             gateway_experimental_multi_user_workspaces=multi_user_workspaces,
             gateway_user_workspaces_dir=str(user_workspaces_dir),
+            gateway_session_auto_resume_latest=session_auto_resume_latest,
             log_mode=_normalize_log_mode(os.getenv("LOG_MODE", cls.log_mode)),
             log_level=_resolve_log_level(
                 os.getenv("LOG_MODE", cls.log_mode),
@@ -283,6 +289,9 @@ class Config:
                 self.gateway_experimental_multi_user_workspaces
             ),
             "gateway_user_workspaces_dir": self.gateway_user_workspaces_dir,
+            "gateway_session_auto_resume_latest": (
+                self.gateway_session_auto_resume_latest
+            ),
             "approval_timeout": self.approval_timeout,
             "log_mode": self.log_mode,
             "log_level": self.log_level,

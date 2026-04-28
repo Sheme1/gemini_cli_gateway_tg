@@ -6,13 +6,15 @@ import signal
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from gateway.config import Config
 from gateway.gemini.error_classifier import classify_gemini_error
 from gateway.gemini.parser import GeminiStreamParser, StreamEvent
 from gateway.runtime import GatewayRuntimeState, PromptLatencySnapshot
+from gateway.session_state import SessionStateStore
 from gateway.user_environment import UserEnvironmentResolver
 
 logger = logging.getLogger(__name__)
@@ -263,6 +265,8 @@ class AssistantTextTracker:
 @dataclass
 class PromptStreamState:
     started_with_session: bool
+    resume_ref: str | None = None
+    resume_source: str = "new"
     text_tracker: AssistantTextTracker = field(default_factory=AssistantTextTracker)
     tool_names_by_id: dict[str, str] = field(default_factory=dict)
     seen_assistant_text: bool = False
@@ -282,6 +286,13 @@ StreamCallback = Callable[[StreamEvent], Awaitable[None]]
 ApprovalCallback = Callable[[dict], Awaitable[None]]
 
 
+@dataclass(frozen=True)
+class ResumeDecision:
+    session_ref: str | None
+    source: str
+    warning: str = ""
+
+
 class SessionManager:
     """Управляет сессиями Gemini CLI."""
 
@@ -293,8 +304,12 @@ class SessionManager:
         self.config = config
         self.runtime_state = runtime_state
         self.user_environments = UserEnvironmentResolver(config)
+        self.session_state = SessionStateStore(
+            Path(config.gateway_state_dir) / "session_state.json"
+        )
         # user_id -> gemini_session_id
         self.active_sessions: dict[int, str] = {}
+        self.active_session_sources: dict[int, str] = {}
         self.active_prompt_processes: dict[int, asyncio.subprocess.Process] = {}
         self._prompt_locks: dict[int, asyncio.Lock] = {}
         self._cancelled_processes: set[int] = set()
@@ -322,6 +337,16 @@ class SessionManager:
 
     def working_dir_for_user(self, user_id: int | None = None) -> str:
         return self.user_environments.working_dir_for(user_id)
+
+    def internal_working_dir_for_user(self, user_id: int, purpose: str = "init") -> str:
+        path = (
+            Path(self.config.gateway_state_dir)
+            / "internal"
+            / f"tg-user-{int(user_id)}"
+            / purpose
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
 
     def artifact_roots_for_user(self, user_id: int | None = None) -> tuple[str, ...]:
         return self.user_environments.artifact_roots_for(user_id)
@@ -462,7 +487,35 @@ class SessionManager:
                 "gemini --list-sessions failed with code "
                 f"{returncode}: {strip_ansi_codes(output).strip()[:1000]}"
             )
-        return parse_gemini_sessions_output(output)
+        return self._mark_active_session(
+            parse_gemini_sessions_output(output),
+            user_id=user_id,
+        )
+
+    def _mark_active_session(
+        self,
+        sessions: list[GeminiSessionInfo],
+        *,
+        user_id: int | None,
+    ) -> list[GeminiSessionInfo]:
+        if user_id is None or not sessions:
+            return sessions
+
+        active_session = self.get_active_session(user_id)
+        if not active_session:
+            return sessions
+
+        current_session_id = (
+            sessions[0].session_id if active_session == "latest" else active_session
+        )
+        return [
+            replace(
+                session,
+                is_current=session.is_current
+                or session.session_id == current_session_id,
+            )
+            for session in sessions
+        ]
 
     async def _run_global_list_command(self, group: str) -> list[str]:
         returncode, output = await self._run_gemini_command(
@@ -519,25 +572,162 @@ class SessionManager:
         for user_id in list(self.active_prompt_processes):
             await self.cancel_active_prompt(user_id, reason="gateway shutdown")
 
-    async def reset(self, user_id: int) -> None:
+    async def reset(self, user_id: int, *, reason: str = "manual") -> None:
         """Сброс контекста (/new): очистка привязанного session_id."""
-        if user_id in self.active_sessions:
-            del self.active_sessions[user_id]
-            logger.info(f"Cleared session context for user {user_id}")
+        had_memory_session = self.active_sessions.pop(user_id, None) is not None
+        self.active_session_sources.pop(user_id, None)
+        self.session_state.mark_cleared(
+            user_id,
+            workspace=self.working_dir_for_user(user_id),
+            source=reason,
+        )
+        logger.info(
+            "Cleared session context for user %s reason=%s had_memory_session=%s",
+            user_id,
+            reason,
+            had_memory_session,
+        )
 
-    async def set_active_session(self, user_id: int, session_id: str) -> None:
+    async def set_active_session(
+        self,
+        user_id: int,
+        session_id: str,
+        *,
+        source: str = "manual",
+    ) -> None:
+        if session_id == "latest" and source == "manual":
+            source = "manual-latest"
+        self._set_active_session(user_id, session_id, source=source)
+        logger.info(
+            "Set active session %s for user %s source=%s",
+            session_id,
+            user_id,
+            source,
+        )
+
+    def _set_active_session(
+        self, user_id: int, session_id: str, *, source: str
+    ) -> None:
+        working_dir = self.working_dir_for_user(user_id)
         self.active_sessions[user_id] = session_id
-        logger.info(f"Set active session {session_id} for user {user_id}")
+        self.active_session_sources[user_id] = source
+        self.session_state.set(
+            user_id,
+            active_session_id=session_id,
+            workspace=working_dir,
+            source=source,
+        )
 
     def get_active_session(self, user_id: int) -> str | None:
-        return self.active_sessions.get(user_id)
+        if user_id in self.active_sessions:
+            return self.active_sessions[user_id]
+
+        working_dir = self.working_dir_for_user(user_id)
+        record = self.session_state.get(user_id, workspace=working_dir)
+        if record is None:
+            return None
+
+        self.active_sessions[user_id] = record.active_session_id
+        self.active_session_sources[user_id] = "persisted"
+        return record.active_session_id
+
+    def get_active_session_source(self, user_id: int) -> str:
+        if self.get_active_session(user_id):
+            return self.active_session_sources.get(user_id, "persisted")
+        return "none"
+
+    async def _resolve_resume_decision(self, user_id: int) -> ResumeDecision:
+        memory_session = self.active_sessions.get(user_id)
+        if memory_session:
+            source = self.active_session_sources.get(user_id, "memory")
+            return ResumeDecision(memory_session, source)
+
+        working_dir = self.working_dir_for_user(user_id)
+        if self.session_state.is_cleared(user_id, workspace=working_dir):
+            return ResumeDecision(None, "new")
+
+        record = self.session_state.get(user_id, workspace=working_dir)
+        if record is not None:
+            if record.active_session_id == "latest" or await self._session_ref_exists(
+                user_id,
+                record.active_session_id,
+            ):
+                self.active_sessions[user_id] = record.active_session_id
+                self.active_session_sources[user_id] = "persisted"
+                return ResumeDecision(record.active_session_id, "persisted")
+
+            logger.warning(
+                "Persisted session %s for user %s is missing; trying latest fallback.",
+                record.active_session_id,
+                user_id,
+            )
+            self.session_state.clear(user_id)
+            if (
+                self.config.gateway_session_auto_resume_latest
+                and await self._has_sessions(user_id)
+            ):
+                self.active_sessions[user_id] = "latest"
+                self.active_session_sources[user_id] = "latest-fallback"
+                return ResumeDecision("latest", "latest-fallback")
+
+            return ResumeDecision(
+                None,
+                "new",
+                warning=(
+                    "⚠️ Сохранённый диалог не найден в Gemini CLI. Начинаю новый диалог."
+                ),
+            )
+
+        if self.config.gateway_session_auto_resume_latest and await self._has_sessions(
+            user_id
+        ):
+            self.active_sessions[user_id] = "latest"
+            self.active_session_sources[user_id] = "latest-fallback"
+            return ResumeDecision("latest", "latest-fallback")
+
+        return ResumeDecision(None, "new")
+
+    async def _session_ref_exists(self, user_id: int, session_id: str) -> bool:
+        try:
+            returncode, output = await self._run_gemini_command(
+                "--list-sessions",
+                cwd=self.working_dir_for_user(user_id),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not validate persisted session for user %s: %s",
+                user_id,
+                exc,
+            )
+            return True
+        if returncode != 0:
+            return True
+        sessions = parse_gemini_sessions_output(output)
+        return any(session.session_id == session_id for session in sessions)
+
+    async def _has_sessions(self, user_id: int) -> bool:
+        try:
+            returncode, output = await self._run_gemini_command(
+                "--list-sessions",
+                cwd=self.working_dir_for_user(user_id),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not list sessions for latest fallback for user %s: %s",
+                user_id,
+                exc,
+            )
+            return False
+        if returncode != 0:
+            return False
+        return bool(parse_gemini_sessions_output(output))
 
     async def delete_session_by_id(
         self, session_id: str, user_id: int | None = None
     ) -> bool:
         deleted, output = await self._delete_session(session_id, user_id=user_id)
         if deleted:
-            self._clear_active_session_refs(session_id)
+            self._clear_active_session_refs(session_id, user_id=user_id)
             return True
 
         sessions = await self.get_sessions_list(user_id=user_id)
@@ -560,7 +750,7 @@ class SessionManager:
                 "gemini --delete-session failed with code "
                 f"nonzero: {combined_output[:1000]}"
             )
-        self._clear_active_session_refs(session_id)
+        self._clear_active_session_refs(session_id, user_id=user_id)
         return True
 
     async def _delete_session(
@@ -575,10 +765,41 @@ class SessionManager:
             return False, output
         return True, output
 
-    def _clear_active_session_refs(self, session_id: str) -> None:
-        for user_id, active_session_id in list(self.active_sessions.items()):
+    def _clear_active_session_refs(
+        self,
+        session_id: str,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        cleared_user_ids: set[int] = set()
+        for active_user_id, active_session_id in list(self.active_sessions.items()):
+            if user_id is not None and active_user_id != user_id:
+                continue
             if active_session_id == session_id:
-                self.active_sessions.pop(user_id, None)
+                self.active_sessions.pop(active_user_id, None)
+                self.active_session_sources.pop(active_user_id, None)
+                self.session_state.mark_cleared(
+                    active_user_id,
+                    workspace=self.working_dir_for_user(active_user_id),
+                    source="delete-current-session",
+                )
+                cleared_user_ids.add(active_user_id)
+                logger.info(
+                    "Cleared session context for user %s reason=delete-current-session",
+                    active_user_id,
+                )
+        for removed_user_id in self.session_state.clear_matching_session(
+            session_id,
+            user_id=user_id,
+        ):
+            self.active_session_sources.pop(removed_user_id, None)
+            if removed_user_id in cleared_user_ids:
+                continue
+            self.session_state.mark_cleared(
+                removed_user_id,
+                workspace=self.working_dir_for_user(removed_user_id),
+                source="delete-current-session",
+            )
 
     async def cancel_active_prompt(self, user_id: int, reason: str = "") -> bool:
         process = self.active_prompt_processes.get(user_id)
@@ -837,11 +1058,17 @@ class SessionManager:
         state: PromptStreamState,
         user_id: int,
     ) -> None:
-        if not event.session_id or state.started_with_session or state.captured_session:
+        if not event.session_id or state.captured_session:
             return
-        self.active_sessions[user_id] = event.session_id
+        source = state.resume_source or "new"
+        self._set_active_session(user_id, event.session_id, source=source)
         state.captured_session = True
-        logger.info("Captured session_id: %s for user %s", event.session_id, user_id)
+        logger.info(
+            "Captured session_id: %s for user %s resume_source=%s",
+            event.session_id,
+            user_id,
+            state.resume_source,
+        )
 
     @staticmethod
     def _should_emit_stream_event(event: StreamEvent) -> bool:
@@ -1008,16 +1235,24 @@ class SessionManager:
         effective_model = model or self.config.gemini_model
         args = self._build_prompt_args(prompt, effective_model)
 
-        session_id = self.active_sessions.get(user_id)
-        if session_id:
-            args.extend(["--resume", session_id])
+        resume_decision = await self._resolve_resume_decision(user_id)
+        if resume_decision.session_ref:
+            args.extend(["--resume", resume_decision.session_ref])
+        if resume_decision.warning:
+            await on_event(
+                StreamEvent(
+                    event_type="warning",
+                    warning_message=resume_decision.warning,
+                )
+            )
 
         working_dir = self.working_dir_for_user(user_id)
         logger.info(
-            "Spawning Gemini for user %s with model %s in %s: %s",
+            "Spawning Gemini for user %s with model %s in %s resume_source=%s: %s",
             user_id,
             effective_model,
             working_dir,
+            resume_decision.source,
             " ".join(arg if arg != prompt else "<prompt>" for arg in args),
         )
         logger.debug("Prompt length for user %s: %s chars", user_id, len(prompt))
@@ -1041,7 +1276,11 @@ class SessionManager:
         timeout = self.config.gemini_cli_timeout
         last_activity = loop.time()
         stderr_buffer = BoundedTextBuffer()
-        state = PromptStreamState(started_with_session=bool(session_id))
+        state = PromptStreamState(
+            started_with_session=bool(resume_decision.session_ref),
+            resume_ref=resume_decision.session_ref,
+            resume_source=resume_decision.source,
+        )
         log_stream = logger.info if self.config.gemini_stream_debug else logger.debug
         heartbeat_task: asyncio.Task | None = None
         stderr_task: asyncio.Task | None = None
@@ -1163,7 +1402,7 @@ class SessionManager:
             effective_model,
             approval_mode=approval_mode,
         )
-        working_dir = self.working_dir_for_user(user_id)
+        working_dir = self.internal_working_dir_for_user(user_id, purpose="init")
 
         logger.info(
             "Spawning internal Gemini prompt for user %s with model %s in %s.",

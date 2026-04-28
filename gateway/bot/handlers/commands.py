@@ -45,8 +45,13 @@ async def command_start_handler(
         f"🟢 /status — состояние шлюза\n"
         f"ℹ️ /help — справка"
     )
-    # Начинаем новую сессию
-    await session_manager.reset(message.from_user.id)
+    active_session = session_manager.get_active_session(message.from_user.id)
+    if active_session:
+        text += (
+            "\n\n"
+            f"Текущий диалог: <code>{html.quote(active_session)}</code>\n"
+            "Команда /start не сбрасывает контекст."
+        )
     await message.answer(text)
 
 
@@ -55,7 +60,7 @@ async def command_new_handler(
     message: Message, session_manager: SessionManager
 ) -> None:
     """Обработчик команды /new — сброс контекста Gemini."""
-    await session_manager.reset(message.from_user.id)
+    await session_manager.reset(message.from_user.id, reason="/new")
     await message.answer(
         "✅ Контекст полностью очищен. Следующее сообщение начнет новый диалог."
     )
@@ -411,6 +416,7 @@ async def command_context_handler(
     model = user_settings.get_effective_model(user_id, config.gemini_model)
     preset_label = get_model_preset_label(preset)
     active_session = session_manager.get_active_session(user_id) or "новый диалог"
+    active_session_source = session_manager.get_active_session_source(user_id)
     environment = session_manager.user_environments.describe_for(user_id)
     include_dirs = (
         ", ".join(config.gemini_include_directories)
@@ -447,6 +453,7 @@ async def command_context_handler(
         f"<b>Gemini CLI:</b> <code>{html.quote(current_gemini)}</code> "
         f"(target <code>{html.quote(config.gemini_target_version)}</code>)\n"
         f"<b>Session:</b> <code>{html.quote(active_session)}</code>\n"
+        f"<b>Session source:</b> <code>{html.quote(active_session_source)}</code>\n"
         f"<b>Isolation:</b> <code>{html.quote(environment['mode'])}</code>\n"
         f"<b>Shared auth/HOME:</b> <code>{html.quote(environment['shared_auth'])}</code>\n"
         f"<b>Working dir:</b> <code>{html.quote(environment['working_dir'])}</code>\n"

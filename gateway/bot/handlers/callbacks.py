@@ -38,10 +38,9 @@ REFRESH_COOLDOWN_SECONDS = 3  # 3 секунды между обновления
 async def callback_model(
     callback: CallbackQuery,
     config: Config,
-    session_manager: SessionManager,
     user_settings: UserSettingsStore,
 ) -> None:
-    """Изменение модели с перезапуском сессии."""
+    """Изменение модели без сброса текущей сессии."""
     new_model = callback.data.split(":")[1]
     current_preset = user_settings.get_model_preset(callback.from_user.id)
 
@@ -59,12 +58,13 @@ async def callback_model(
         "🔄 Модель изменена.\n\n"
         f"<b>Пресет:</b> {get_model_preset_label(selected_preset)}\n"
         f"<b>Модель:</b> <code>{effective_model}</code>\n\n"
-        "Текущий диалог сброшен.",
+        "Текущий диалог сохранён.",
         reply_markup=None,
     )
 
-    await session_manager.reset(callback.from_user.id)
-    await callback.message.answer("✅ Готово! Контекст очищен, новая модель применена.")
+    await callback.message.answer(
+        "✅ Готово! Новая модель применена без сброса контекста."
+    )
     await callback.answer()
 
 
@@ -314,9 +314,7 @@ async def callback_settings_approval(callback: CallbackQuery, config: Config) ->
 
 
 @router.callback_query(F.data.startswith("set_approval:"))
-async def callback_set_approval(
-    callback: CallbackQuery, config: Config, session_manager: SessionManager
-) -> None:
+async def callback_set_approval(callback: CallbackQuery, config: Config) -> None:
     """Установка нового approval_mode."""
     new_mode = callback.data.split(":")[1]
 
@@ -328,11 +326,12 @@ async def callback_set_approval(
 
     await callback.message.edit_text(
         f"🔄 Режим подтверждений изменён: <b>{get_approval_mode_label(new_mode)}</b>.\n"
-        "Текущий диалог сброшен.",
+        "Текущий диалог сохранён.",
         reply_markup=None,
     )
-    await session_manager.reset(callback.from_user.id)
-    await callback.message.answer("✅ Готово. Новый режим применён.")
+    await callback.message.answer(
+        "✅ Готово. Новый режим применён без сброса контекста."
+    )
     await callback.answer()
 
 

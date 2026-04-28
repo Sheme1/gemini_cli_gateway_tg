@@ -144,6 +144,7 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `POLLING_TIMEOUT` | No | Telegram long-polling timeout passed to aiogram. |
 | `POLLING_CONCURRENCY_LIMIT` | No | Maximum concurrent update handlers. Per-user prompt locks still prevent overlapping Gemini prompts. |
 | `GATEWAY_STATE_DIR` | No | Writable gateway state directory for user settings. Relative paths resolve from the process working directory. |
+| `GATEWAY_SESSION_AUTO_RESUME_LATEST` | No | `true` by default. If no persisted active session exists yet, continue Gemini CLI `latest` for the user's project instead of silently starting a new chat. |
 | `GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES` | No | `false` by default. When `true`, each Telegram `from_user.id` gets a separate workspace, project sessions, artifacts, profile, and `GEMINI.md`, while Gemini CLI auth/HOME remains shared. |
 | `GATEWAY_USER_WORKSPACES_DIR` | No | Base directory for experimental per-user workspaces. Empty/default means `<GATEWAY_STATE_DIR>/users`; for Ubuntu/systemd use something like `/srv/gemini-gateway/users`. |
 | `APPROVAL_TIMEOUT` | No | Seconds before pending interactive approval expires. Headless approval is still limited by Gemini CLI behavior. |
@@ -258,8 +259,8 @@ If you use Docker, remember that Gemini CLI auth lives inside the container volu
 
 | Command | Description |
 | --- | --- |
-| `/start` | Reset the current user session and show the intro message |
-| `/new` | Start a fresh Gemini conversation |
+| `/start` | Show the intro message without resetting the current Gemini session |
+| `/new` | Explicitly clear the current active session and start a fresh Gemini conversation |
 | `/sessions [filter\|latest]` | Page through saved Gemini sessions, search by title/id/index, resume latest, delete, or export the list as TXT |
 | `/mcp` | Show installed MCP servers |
 | `/skills` | Show installed Gemini skills |
@@ -281,8 +282,8 @@ This gateway currently uses a headless request model:
 
 1. each Telegram prompt launches `gemini -p ... -o stream-json --skip-trust --approval-mode=...`
 2. Gemini returns a `session_id`
-3. the gateway stores that `session_id` per user
-4. later prompts continue the same context with `--resume`
+3. the gateway stores that `session_id` per user in `session_state.json`
+4. later prompts continue the same context with `--resume`, including after `systemctl restart` or `update.sh`
 
 That keeps conversations continuous without depending on one forever-running subprocess.
 
@@ -303,9 +304,11 @@ skills, and global CLI settings remain shared because this mode intentionally
 keeps one server account and one Gemini login.
 
 `/init` asks five short questions, stores the answers in `profile.json`, asks
-Gemini CLI to generate a compact Markdown preview, validates that it is a
-personal-instructions file without server/tool internals, and writes
-`workspace/GEMINI.md` only after the user confirms it.
+Gemini CLI to generate a compact Markdown preview from an internal gateway
+working directory, validates that it is a personal-instructions file without
+server/tool internals, and writes `workspace/GEMINI.md` only after the user
+confirms it. Internal `/init` prompts do not change the user's active session
+and do not appear in the user's `/sessions` list.
 
 `/sessions` uses `gemini --list-sessions`, parses the Gemini CLI 0.39.1 text
 format, reverses it so the newest chats appear first, and shows five dialogs per
@@ -320,11 +323,12 @@ Later edits are coalesced by `STREAM_UPDATE_INTERVAL` and
 done, the gateway normalizes the final text and renders a safe Telegram HTML
 version; if Telegram rejects the HTML, it falls back to plain text.
 
-Model selection is stored per Telegram user in `GATEWAY_STATE_DIR`; the `.env`
-model is the fallback. The preferred presets use Gemini CLI aliases (`auto`,
-`pro`, `flash`, `flash-lite`) so CLI-side model routing can keep working. Usage
-counters are stored in `usage.json` and contain only totals, result status,
-stats metadata, and last-request metadata, never prompt text.
+Active sessions and model selection are stored per Telegram user in
+`GATEWAY_STATE_DIR`; the `.env` model is the fallback. `/start`, `/cancel`, and
+model changes do not reset the active session. The preferred presets use Gemini
+CLI aliases (`auto`, `pro`, `flash`, `flash-lite`) so CLI-side model routing can
+keep working. Usage counters are stored in `usage.json` and contain only totals,
+result status, stats metadata, and last-request metadata, never prompt text.
 
 ACP (`gemini --acp`) is not the default transport. In Gemini CLI 0.39.1 it is a
 JSON-RPC/stdio mode mainly intended for IDE and editor integrations. This

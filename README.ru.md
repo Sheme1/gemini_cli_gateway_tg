@@ -144,6 +144,7 @@ python -m gateway.main --doctor-json
 | `POLLING_TIMEOUT` | Нет | Timeout long polling, который передаётся в aiogram. |
 | `POLLING_CONCURRENCY_LIMIT` | Нет | Максимум параллельных update handlers. Для одного пользователя запросы Gemini всё равно защищены lock-ом. |
 | `GATEWAY_STATE_DIR` | Нет | Папка состояния шлюза и пользовательских настроек. Относительный путь считается от рабочей директории процесса. |
+| `GATEWAY_SESSION_AUTO_RESUME_LATEST` | Нет | По умолчанию `true`. Если сохранённой active session ещё нет, gateway продолжит Gemini CLI `latest` для пользовательского проекта вместо тихого старта нового чата. |
 | `GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES` | Нет | По умолчанию `false`. При `true` каждый Telegram `from_user.id` получает отдельный workspace, project sessions, artifacts, profile и `GEMINI.md`, но Gemini CLI auth/HOME остаётся общим. |
 | `GATEWAY_USER_WORKSPACES_DIR` | Нет | Базовая папка экспериментальных пользовательских workspace. Пустое значение означает `<GATEWAY_STATE_DIR>/users`; для Ubuntu/systemd удобно `/srv/gemini-gateway/users`. |
 | `APPROVAL_TIMEOUT` | Нет | Сколько секунд ждать интерактивное подтверждение. Headless approval всё ещё ограничен поведением Gemini CLI. |
@@ -259,8 +260,8 @@ docker compose logs -f gateway
 
 | Команда | Описание |
 | --- | --- |
-| `/start` | Сбрасывает текущую пользовательскую сессию и показывает вводное сообщение |
-| `/new` | Начинает новый диалог с Gemini |
+| `/start` | Показывает вводное сообщение без сброса текущей Gemini-сессии |
+| `/new` | Явно очищает active session и начинает новый диалог с Gemini |
 | `/sessions [фильтр\|latest]` | Показывает сохранённые сессии Gemini: поиск по title/id/index, latest, открыть, удалить или экспортировать TXT |
 | `/mcp` | Показывает установленные MCP-серверы |
 | `/skills` | Показывает установленные Gemini skills |
@@ -282,8 +283,8 @@ docker compose logs -f gateway
 
 1. каждый Telegram-запрос запускает `gemini -p ... -o stream-json --skip-trust --approval-mode=...`
 2. Gemini возвращает `session_id`
-3. шлюз сохраняет этот `session_id` отдельно для пользователя
-4. следующие сообщения продолжают тот же контекст через `--resume`
+3. шлюз сохраняет этот `session_id` отдельно для пользователя в `session_state.json`
+4. следующие сообщения продолжают тот же контекст через `--resume`, включая случаи после `systemctl restart` или `update.sh`
 
 Это позволяет держать непрерывный диалог без одного постоянно живущего процесса Gemini CLI.
 
@@ -304,9 +305,11 @@ workspace/artifacts текущего пользователя. Gemini CLI auth, 
 сохраняет один серверный аккаунт и один Gemini login.
 
 `/init` задаёт пять коротких вопросов, сохраняет ответы в `profile.json`, просит
-Gemini CLI сгенерировать компактный Markdown-preview, проверяет что это личные
-инструкции без внутренних деталей сервера/tools, и записывает
-`workspace/GEMINI.md` только после подтверждения пользователя.
+Gemini CLI сгенерировать компактный Markdown-preview из внутренней служебной
+папки gateway, проверяет что это личные инструкции без внутренних деталей
+сервера/tools, и записывает `workspace/GEMINI.md` только после подтверждения
+пользователя. Внутренние `/init`-запросы не меняют active session пользователя
+и не попадают в его список `/sessions`.
 
 `/sessions` использует `gemini --list-sessions`, разбирает текстовый формат
 Gemini CLI 0.39.1, разворачивает порядок так, чтобы новые диалоги были сверху,
@@ -322,11 +325,12 @@ text с `parse_mode=None`, чтобы неполный Markdown/HTML не лом
 завершения stream gateway нормализует финальный текст и рендерит безопасный
 Telegram HTML; если Telegram отклонит HTML, бот вернётся к plain text.
 
-Выбор модели хранится отдельно для каждого Telegram-пользователя в
-`GATEWAY_STATE_DIR`; модель из `.env` остаётся fallback. Предпочтительные пресеты
-используют alias Gemini CLI (`auto`, `pro`, `flash`, `flash-lite`), чтобы
-сохранялась CLI-side model routing. Счётчики usage пишутся в `usage.json` и
-содержат только totals, result status, stats metadata и metadata последнего
+Active session и выбор модели хранятся отдельно для каждого
+Telegram-пользователя в `GATEWAY_STATE_DIR`; модель из `.env` остаётся fallback.
+`/start`, `/cancel` и смена модели не сбрасывают active session. Предпочтительные
+пресеты используют alias Gemini CLI (`auto`, `pro`, `flash`, `flash-lite`),
+чтобы сохранялась CLI-side model routing. Счётчики usage пишутся в `usage.json`
+и содержат только totals, result status, stats metadata и metadata последнего
 запроса, без текста пользовательских запросов.
 
 ACP (`gemini --acp`) не включён как основной транспорт. В Gemini CLI 0.39.1 это
