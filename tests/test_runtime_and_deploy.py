@@ -52,6 +52,7 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         monkeypatch.setenv("PROMPT_CONFIRM_TIMEOUT", "33")
         monkeypatch.setenv("USER_DAILY_TOKEN_LIMIT", "1000")
         monkeypatch.setenv("GLOBAL_DAILY_TOKEN_LIMIT", "2000")
+        monkeypatch.setenv("GEMINI_STREAM_READER_LIMIT_BYTES", "123456")
         monkeypatch.delenv("GEMINI_TARGET_VERSION", raising=False)
         monkeypatch.setenv("GEMINI_SKIP_TRUST", "false")
         monkeypatch.setenv("LOG_MODE", "debug")
@@ -94,6 +95,7 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.prompt_confirm_timeout == 33
         assert config.user_daily_token_limit == 1000
         assert config.global_daily_token_limit == 2000
+        assert config.gemini_stream_reader_limit_bytes == 123456
         assert config.log_mode == "debug"
         assert config.log_level == "DEBUG"
         assert config.gateway_state_dir == str((tmp_path / "state").resolve())
@@ -103,6 +105,7 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert (
             config.redacted_dict()["gateway_experimental_multi_user_workspaces"] is True
         )
+        assert config.redacted_dict()["gemini_stream_reader_limit_bytes"] == 123456
         assert config.redacted_dict()["telegram_bot_token"] == "1234...oken"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
@@ -134,6 +137,7 @@ def test_config_parses_target_chat_id_allowlist(
         assert config.target_chat_id == expected_first
         assert config.target_chat_ids == expected_ids
         assert config.allowed_target_chat_ids == expected_ids
+        assert config.gemini_stream_reader_limit_bytes == 8 * 1024 * 1024
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
@@ -201,11 +205,14 @@ def test_readmes_document_multi_chat_id_and_update_flow() -> None:
     for text in (readme_en, readme_ru, env_example):
         assert "TARGET_CHAT_ID=111111111,222222222" in text
         assert "GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES" in text
+        assert "GEMINI_STREAM_READER_LIMIT_BYTES" in text
     for text in (readme_en, readme_ru):
         assert "update.sh" in text
         assert "git pull --ff-only" in text
         assert "daemon-reload" in text
         assert "/init" in text
+    assert "family/shared" not in readme_en
+    assert "семейного/shared" not in readme_ru
 
 
 @pytest.mark.asyncio
@@ -264,7 +271,8 @@ async def test_startup_preflight_deletes_existing_webhook(monkeypatch) -> None:
     tmp_path = make_test_dir()
     try:
 
-        async def fake_probe(command: str, *_args, cwd=None):
+        async def fake_probe(command: str, *_args, cwd=None, limit=None):
+            del limit
             return CommandProbe(command=command, path=f"/bin/{command}", version="1.0")
 
         monkeypatch.setattr("gateway.runtime.probe_command", fake_probe)
@@ -298,8 +306,8 @@ async def test_doctor_warns_on_gemini_version_mismatch(monkeypatch) -> None:
         monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path / "state"))
         monkeypatch.setenv("GEMINI_TARGET_VERSION", "0.39.1")
 
-        async def fake_probe(command: str, *_args, cwd=None):
-            del cwd
+        async def fake_probe(command: str, *_args, cwd=None, limit=None):
+            del cwd, limit
             version = "0.40.0" if "gemini" in command else "v22.0.0"
             return CommandProbe(
                 command=command, path=f"/bin/{command}", version=version
@@ -327,8 +335,8 @@ async def test_doctor_warns_when_headless_trust_is_disabled(monkeypatch) -> None
         monkeypatch.setenv("GEMINI_SKIP_TRUST", "false")
         monkeypatch.delenv("GEMINI_CLI_TRUST_WORKSPACE", raising=False)
 
-        async def fake_probe(command: str, *_args, cwd=None):
-            del cwd
+        async def fake_probe(command: str, *_args, cwd=None, limit=None):
+            del cwd, limit
             version = "0.39.1" if "gemini" in command else "v22.0.0"
             return CommandProbe(
                 command=command, path=f"/bin/{command}", version=version

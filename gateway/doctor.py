@@ -177,6 +177,7 @@ async def _runtime_checks(config: Config) -> list[DoctorCheck]:
             config.gemini_bin,
             "--version",
             cwd=config.gemini_working_dir,
+            limit=config.gemini_stream_reader_limit_bytes,
         )
         gemini_status = (
             "ok"
@@ -238,7 +239,10 @@ async def _gemini_capability_checks(config: Config) -> list[DoctorCheck]:
     }
     try:
         output = await _command_output(
-            config.gemini_bin, "--help", cwd=config.gemini_working_dir
+            config.gemini_bin,
+            "--help",
+            cwd=config.gemini_working_dir,
+            limit=config.gemini_stream_reader_limit_bytes,
         )
     except Exception as exc:
         return [
@@ -272,7 +276,12 @@ async def _gemini_capability_checks(config: Config) -> list[DoctorCheck]:
     ]
 
 
-async def _command_output(command: str, *args: str, cwd: str | None = None) -> str:
+async def _command_output(
+    command: str,
+    *args: str,
+    cwd: str | None = None,
+    limit: int = 8 * 1024 * 1024,
+) -> str:
     executable = shutil.which(command) or command
     process = await asyncio.create_subprocess_exec(
         executable,
@@ -280,6 +289,7 @@ async def _command_output(command: str, *args: str, cwd: str | None = None) -> s
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        limit=limit,
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)

@@ -128,7 +128,7 @@ async def _handle_init_answer(
         await status_message.edit_text(
             "❌ Не удалось сгенерировать GEMINI.md через Gemini CLI.\n\n"
             f"<code>{html.quote(str(exc))}</code>\n\n"
-            "Используйте /init и попробуйте ещё раз."
+            "Используйте /init reset и попробуйте ещё раз."
         )
         return
 

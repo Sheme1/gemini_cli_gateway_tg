@@ -36,6 +36,7 @@ class Config:
     gemini_screen_reader: bool = False
     gemini_artifact_roots: tuple[str, ...] = field(default_factory=tuple)
     gemini_cli_timeout: int = 600  # секунды
+    gemini_stream_reader_limit_bytes: int = 8 * 1024 * 1024
     gemini_shutdown_grace_seconds: float = 5.0
     gemini_sandbox: bool = False
     gemini_stream_debug: bool = False
@@ -201,6 +202,12 @@ class Config:
             gemini_cli_timeout=int(
                 os.getenv("GEMINI_CLI_TIMEOUT", str(cls.gemini_cli_timeout))
             ),
+            gemini_stream_reader_limit_bytes=int(
+                os.getenv(
+                    "GEMINI_STREAM_READER_LIMIT_BYTES",
+                    str(cls.gemini_stream_reader_limit_bytes),
+                )
+            ),
             gemini_shutdown_grace_seconds=float(
                 os.getenv(
                     "GEMINI_SHUTDOWN_GRACE_SECONDS",
@@ -310,6 +317,7 @@ class Config:
             "gemini_screen_reader": self.gemini_screen_reader,
             "gemini_artifact_roots": self.gemini_artifact_roots,
             "gemini_cli_timeout": self.gemini_cli_timeout,
+            "gemini_stream_reader_limit_bytes": self.gemini_stream_reader_limit_bytes,
             "gemini_shutdown_grace_seconds": self.gemini_shutdown_grace_seconds,
             "gemini_sandbox": self.gemini_sandbox,
             "gemini_stream_debug": self.gemini_stream_debug,

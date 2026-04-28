@@ -11,12 +11,45 @@ from gateway.user_environment import UserEnvironmentResolver
 
 
 INIT_QUESTIONS: tuple[tuple[str, str], ...] = (
-    ("name", "Как к тебе обращаться?"),
-    ("language", "На каком языке и в каком тоне отвечать по умолчанию?"),
-    ("detail_level", "Насколько подробно отвечать: кратко, средне или подробно?"),
-    ("common_tasks", "Для каких задач ты чаще всего будешь использовать бота?"),
-    ("interests", "Какие темы, интересы или семейный контекст стоит помнить?"),
-    ("limits", "Какие запреты, ограничения или нежелательные форматы учитывать?"),
+    ("name", "Как к тебе обращаться? Пример: Тимофей."),
+    (
+        "language_tone",
+        "На каком языке и в каком тоне отвечать? Пример: русский, спокойно и по делу.",
+    ),
+    (
+        "typical_tasks",
+        "Какие задачи чаще всего будут у бота? Пример: код, тексты, документы, учёба.",
+    ),
+    (
+        "response_format",
+        "Какой формат ответов удобен? Пример: сначала краткий ответ, потом шаги.",
+    ),
+    (
+        "boundaries",
+        "Что нельзя делать или что важно уточнять? Пример: не выдумывать факты, "
+        "спрашивать при нехватке данных.",
+    ),
+)
+
+_FORBIDDEN_GEMINI_MD_TERMS = (
+    "telegram",
+    "gateway",
+    "семья",
+    "семей",
+    "family",
+    "skill",
+    "skills",
+    "tool",
+    "tools",
+    "навык",
+    "навыки",
+    "инструмент",
+    "инструменты",
+    "systemd",
+    "ubuntu",
+    "workspace",
+    "активирую",
+    "воспользуюсь",
 )
 
 
@@ -118,6 +151,7 @@ class InitWizardStore:
             markdown = str(profile.get("gemini_md_preview") or "").strip()
         if not markdown:
             raise RuntimeError("Нет готового preview для записи GEMINI.md.")
+        markdown = sanitize_gemini_md(markdown)
 
         environment = self.environments.for_user(normalized_user_id)
         environment.gemini_md_path.write_text(
@@ -156,7 +190,7 @@ class InitWizardStore:
 
     def _build_profile(self, user_id: int, answers: dict[str, str]) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "telegram_user_id": int(user_id),
             "status": "answers_collected",
             "answers": dict(answers),
@@ -169,12 +203,19 @@ def build_gemini_md_prompt(profile: dict[str, Any]) -> str:
     answers = profile.get("answers") if isinstance(profile.get("answers"), dict) else {}
     payload = json.dumps(answers, ensure_ascii=False, indent=2)
     return (
-        "Ты создаёшь персональный GEMINI.md для Gemini CLI 0.39.1.\n"
-        "Файл будет лежать в личном workspace пользователя Telegram gateway.\n"
-        "Используй ответы анкеты и верни только готовый Markdown без code fence.\n"
-        "Не проси дополнительных данных, не используй инструменты и не записывай файлы.\n"
-        "Сделай инструкции полезными для личного ассистента: обращение, язык, стиль, "
-        "типичные задачи, предпочтения, ограничения и формат ответов.\n\n"
+        "Ты создаёшь содержимое файла GEMINI.md для Gemini CLI 0.39.1.\n"
+        "Используй только ответы анкеты ниже. Не выдумывай факты, биографию, "
+        "интересы, профессии, доступы, окружение или будущие действия.\n"
+        "Верни только готовый Markdown без code fence, вступлений и пояснений.\n"
+        "Строгий формат:\n"
+        "# Личные инструкции\n"
+        "- 5-8 коротких инструкций в виде Markdown bullet list.\n"
+        "- Каждая инструкция должна быть практичной и проверяемой.\n"
+        "- Не упоминай Telegram, gateway, сервер, Ubuntu, workspace, семью, "
+        "skills, tools, MCP, расширения, systemd или внутреннюю реализацию.\n"
+        "- Не заявляй, что ты активируешь навыки, инструменты или поиск.\n"
+        "- Если ответ анкеты пустой или неопределённый, запиши нейтральное правило: "
+        "уточнять детали перед действием.\n\n"
         f"Ответы анкеты:\n{payload}\n"
     )
 
@@ -188,26 +229,34 @@ def sanitize_gemini_md(markdown: str) -> str:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
-    return text or fallback_gemini_md({})
+    _validate_gemini_md(text)
+    return text
 
 
-def fallback_gemini_md(profile: dict[str, Any]) -> str:
-    answers = profile.get("answers") if isinstance(profile.get("answers"), dict) else {}
-    name = answers.get("name") or "пользователь"
-    language = answers.get("language") or "отвечай на языке пользователя"
-    detail = answers.get("detail_level") or "средний уровень подробности"
-    tasks = answers.get("common_tasks") or "повседневные вопросы и рабочие задачи"
-    interests = answers.get("interests") or "учитывай семейный и личный контекст"
-    limits = answers.get("limits") or "не выдумывай факты и уточняй неоднозначности"
-    return (
-        "# Персональные инструкции\n\n"
-        f"- Обращайся ко мне: {name}.\n"
-        f"- Язык и тон: {language}.\n"
-        f"- Подробность: {detail}.\n"
-        f"- Типичные задачи: {tasks}.\n"
-        f"- Контекст и интересы: {interests}.\n"
-        f"- Ограничения: {limits}.\n"
+def _validate_gemini_md(markdown: str) -> None:
+    text = markdown.strip()
+    if not text:
+        raise ValueError("Gemini вернул пустой preview GEMINI.md.")
+    if "```" in text:
+        raise ValueError("Gemini вернул preview с code fence.")
+    if not text.startswith("# Личные инструкции"):
+        raise ValueError("Gemini вернул preview не в формате '# Личные инструкции'.")
+
+    bullet_count = sum(
+        1 for line in text.splitlines() if line.lstrip().startswith(("- ", "* "))
     )
+    if bullet_count < 5 or bullet_count > 8:
+        raise ValueError(
+            "Gemini вернул preview не в формате 5-8 коротких Markdown bullets."
+        )
+
+    lowered = text.lower()
+    forbidden = [term for term in _FORBIDDEN_GEMINI_MD_TERMS if term in lowered]
+    if forbidden:
+        raise ValueError(
+            "Gemini вернул preview с лишним системным или выдуманным контекстом: "
+            + ", ".join(sorted(set(forbidden))[:5])
+        )
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

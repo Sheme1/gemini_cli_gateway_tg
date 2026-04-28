@@ -22,11 +22,19 @@ def make_test_dir() -> Path:
 
 
 class _FakeStream:
-    def __init__(self, lines: list[str], wait_event: asyncio.Event | None = None):
+    def __init__(
+        self,
+        lines: list[str],
+        wait_event: asyncio.Event | None = None,
+        error: BaseException | None = None,
+    ):
         self._lines = [f"{line}\n".encode("utf-8") for line in lines]
         self._wait_event = wait_event
+        self._error = error
 
     async def readline(self) -> bytes:
+        if self._error:
+            raise self._error
         if self._lines:
             return self._lines.pop(0)
         if self._wait_event:
@@ -41,9 +49,14 @@ class _FakeProcess:
         stderr_lines: list[str] | None = None,
         returncode_on_wait: int = 0,
         block_stdout: bool = False,
+        stdout_error: BaseException | None = None,
     ):
         self._finished = asyncio.Event()
-        self.stdout = _FakeStream(lines, self._finished if block_stdout else None)
+        self.stdout = _FakeStream(
+            lines,
+            self._finished if block_stdout else None,
+            stdout_error,
+        )
         self.stderr = _FakeStream(stderr_lines or [])
         self._returncode_on_wait = returncode_on_wait
         self.returncode = None
@@ -246,6 +259,49 @@ async def test_session_manager_emits_stderr_on_nonzero_exit(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_session_manager_reports_stream_reader_limit_error(monkeypatch) -> None:
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return _FakeProcess(
+            [],
+            stdout_error=ValueError(
+                "Separator is not found, and chunk exceed the limit"
+            ),
+        )
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+        gemini_stream_reader_limit_bytes=123456,
+    )
+    manager = SessionManager(config)
+    events = []
+
+    async def on_event(event):
+        events.append(event)
+
+    async def on_approval(_req):
+        raise AssertionError("approval request was not expected")
+
+    await manager.send_prompt(
+        prompt="test",
+        user_id=123,
+        on_event=on_event,
+        on_approval=on_approval,
+    )
+
+    assert events[-1].event_type == "error"
+    assert "stream-json" in events[-1].error_message
+    assert "GEMINI_STREAM_READER_LIMIT_BYTES" in events[-1].error_message
+    assert "123456" in events[-1].error_message
+
+
+@pytest.mark.asyncio
 async def test_session_manager_warns_on_headless_approval_request(monkeypatch) -> None:
     lines = [
         json.dumps(
@@ -341,6 +397,7 @@ async def test_session_manager_deduplicates_full_message_snapshots(monkeypatch) 
 @pytest.mark.asyncio
 async def test_session_manager_passes_include_directories(monkeypatch) -> None:
     captured_args = []
+    captured_kwargs = {}
 
     lines = [
         json.dumps(
@@ -352,8 +409,9 @@ async def test_session_manager_passes_include_directories(monkeypatch) -> None:
         ),
     ]
 
-    async def fake_create_subprocess_exec(*args, **_kwargs):
+    async def fake_create_subprocess_exec(*args, **kwargs):
         captured_args.extend(args)
+        captured_kwargs.update(kwargs)
         return _FakeProcess(lines)
 
     monkeypatch.setattr(
@@ -371,6 +429,7 @@ async def test_session_manager_passes_include_directories(monkeypatch) -> None:
         gemini_allowed_mcp_server_names=("github", "context7"),
         gemini_extensions=("none",),
         gemini_screen_reader=True,
+        gemini_stream_reader_limit_bytes=123456,
     )
     manager = SessionManager(config)
 
@@ -410,6 +469,7 @@ async def test_session_manager_passes_include_directories(monkeypatch) -> None:
     ]
     assert captured_args[captured_args.index("--extensions") + 1] == "none"
     assert "--screen-reader" in captured_args
+    assert captured_kwargs["limit"] == 123456
 
 
 @pytest.mark.asyncio
@@ -464,6 +524,7 @@ async def test_session_manager_uses_per_user_working_dir_when_enabled(
         assert captured_kwargs["cwd"] == str(
             tmp_path / "users" / "tg-user-42" / "workspace"
         )
+        assert captured_kwargs["limit"] == config.gemini_stream_reader_limit_bytes
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
@@ -513,6 +574,78 @@ async def test_session_manager_can_disable_skip_trust(monkeypatch) -> None:
     )
 
     assert "--skip-trust" not in captured_args
+
+
+@pytest.mark.asyncio
+async def test_session_manager_generate_text_passes_stream_limit(monkeypatch) -> None:
+    captured_kwargs = {}
+    lines = [
+        json.dumps(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "# Личные инструкции\n\n- One\n- Two\n- Three\n- Four\n- Five",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {"total_tokens": 1, "duration_ms": 10},
+            }
+        ),
+    ]
+
+    async def fake_create_subprocess_exec(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeProcess(lines)
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+        gemini_stream_reader_limit_bytes=654321,
+    )
+    manager = SessionManager(config)
+
+    text = await manager.generate_text("build init", user_id=123)
+
+    assert "# Личные инструкции" in text
+    assert captured_kwargs["limit"] == 654321
+
+
+@pytest.mark.asyncio
+async def test_session_manager_generate_text_reports_stream_limit_error(
+    monkeypatch,
+) -> None:
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return _FakeProcess(
+            [],
+            stdout_error=ValueError(
+                "Separator is not found, and chunk exceed the limit"
+            ),
+        )
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+        gemini_stream_reader_limit_bytes=654321,
+    )
+    manager = SessionManager(config)
+
+    with pytest.raises(RuntimeError, match="GEMINI_STREAM_READER_LIMIT_BYTES"):
+        await manager.generate_text("build init", user_id=123)
 
 
 @pytest.mark.asyncio

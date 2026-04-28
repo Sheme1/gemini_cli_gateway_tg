@@ -132,6 +132,24 @@ def _build_empty_stream_warning(stderr_text: str) -> str:
     )
 
 
+def _is_stream_reader_limit_error(exc: BaseException) -> bool:
+    return isinstance(exc, asyncio.LimitOverrunError) or (
+        isinstance(exc, ValueError)
+        and "Separator is not found, and chunk exceed the limit" in str(exc)
+    )
+
+
+def _build_stream_reader_limit_error(limit_bytes: int) -> str:
+    limit_mib = limit_bytes / (1024 * 1024)
+    return (
+        "Gemini CLI прислал слишком крупное stream-json событие, и gateway "
+        "не смог прочитать его одной JSONL-строкой.\n\n"
+        f"Текущий лимит чтения: {limit_bytes} байт (~{limit_mib:.1f} MiB).\n\n"
+        "Увеличьте в .env параметр GEMINI_STREAM_READER_LIMIT_BYTES и "
+        "перезапустите сервис: sudo systemctl restart telegram-gateway."
+    )
+
+
 def _build_headless_approval_warning(request: dict) -> str:
     tool_name = (
         request.get("tool")
@@ -209,6 +227,7 @@ class SessionManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.working_dir_for_user(user_id),
+            limit=self.config.gemini_stream_reader_limit_bytes,
         )
         stdout, stderr = await process.communicate()
         output = (
@@ -232,6 +251,7 @@ class SessionManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,  # Читаем stderr тоже
             cwd=self.config.gemini_working_dir,
+            limit=self.config.gemini_stream_reader_limit_bytes,
         )
         stdout, stderr = await process.communicate()
         # Объединяем stdout и stderr, так как вывод может быть в любом из них
@@ -273,6 +293,7 @@ class SessionManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,  # Читаем stderr тоже
             cwd=self.config.gemini_working_dir,
+            limit=self.config.gemini_stream_reader_limit_bytes,
         )
         stdout, stderr = await process.communicate()
         # Объединяем stdout и stderr, так как вывод может быть в любом из них
@@ -406,6 +427,7 @@ class SessionManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.working_dir_for_user(user_id),
+            limit=self.config.gemini_stream_reader_limit_bytes,
         )
         stdout, stderr = await process.communicate()
         output = (
@@ -566,6 +588,7 @@ class SessionManager:
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
             "cwd": working_dir,
+            "limit": self.config.gemini_stream_reader_limit_bytes,
         }
         if os.name == "nt":
             process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -615,7 +638,19 @@ class SessionManager:
             if not process.stderr:
                 return
             while True:
-                line = await process.stderr.readline()
+                try:
+                    line = await process.stderr.readline()
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    if not _is_stream_reader_limit_error(exc):
+                        raise
+                    text = _build_stream_reader_limit_error(
+                        self.config.gemini_stream_reader_limit_bytes
+                    )
+                    stderr_buffer.append(text)
+                    logger.warning(
+                        "Gemini stderr stream reader limit exceeded: %s", exc
+                    )
+                    break
                 if not line:
                     break
                 text = strip_ansi_codes(line.decode("utf-8", errors="replace"))
@@ -690,6 +725,20 @@ class SessionManager:
                                 ),
                             )
                         )
+                    break
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    if not _is_stream_reader_limit_error(exc):
+                        raise
+                    emitted_terminal_warning = True
+                    await self._terminate_process(process)
+                    await on_event(
+                        StreamEvent(
+                            event_type="error",
+                            error_message=_build_stream_reader_limit_error(
+                                self.config.gemini_stream_reader_limit_bytes
+                            ),
+                        )
+                    )
                     break
 
                 if not line_bytes:
@@ -951,6 +1000,7 @@ class SessionManager:
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
             "cwd": working_dir,
+            "limit": self.config.gemini_stream_reader_limit_bytes,
         }
         if os.name == "nt":
             process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -976,7 +1026,19 @@ class SessionManager:
             if not process.stderr:
                 return
             while True:
-                line = await process.stderr.readline()
+                try:
+                    line = await process.stderr.readline()
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    if not _is_stream_reader_limit_error(exc):
+                        raise
+                    text = _build_stream_reader_limit_error(
+                        self.config.gemini_stream_reader_limit_bytes
+                    )
+                    stderr_buffer.append(text)
+                    logger.warning(
+                        "Gemini stderr stream reader limit exceeded: %s", exc
+                    )
+                    break
                 if not line:
                     break
                 text = strip_ansi_codes(line.decode("utf-8", errors="replace"))
@@ -997,6 +1059,15 @@ class SessionManager:
                     elapsed = int(loop.time() - last_activity)
                     raise RuntimeError(
                         f"Gemini CLI не отвечал {elapsed} секунд во время /init."
+                    ) from exc
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    if not _is_stream_reader_limit_error(exc):
+                        raise
+                    await self._terminate_process(process)
+                    raise RuntimeError(
+                        _build_stream_reader_limit_error(
+                            self.config.gemini_stream_reader_limit_bytes
+                        )
                     ) from exc
 
                 if not line_bytes:

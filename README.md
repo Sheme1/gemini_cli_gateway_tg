@@ -125,6 +125,7 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `GEMINI_INCLUDE_DIRECTORIES` | No | Extra directories for Gemini workspace access, comma-separated. Example: `/srv/project/shared,/srv/docs`. Passed as `--include-directories`. |
 | `GEMINI_ARTIFACT_ROOTS` | No | Directories where generated files are searched, comma-separated. Defaults to `GEMINI_WORKING_DIR`. |
 | `GEMINI_CLI_TIMEOUT` | No | Seconds without Gemini stdout before the gateway stops the process and reports a timeout. |
+| `GEMINI_STREAM_READER_LIMIT_BYTES` | No | Max bytes for one Gemini stdout/stderr line. Defaults to `8388608` (8 MiB); increase if Gemini emits a very large `stream-json` event. |
 | `GEMINI_SHUTDOWN_GRACE_SECONDS` | No | Seconds to wait after graceful termination before killing the Gemini process group. |
 | `GEMINI_SANDBOX` | No | `true` or `false`. When true, passes `--sandbox` to Gemini CLI. |
 | `GEMINI_STREAM_DEBUG` | No | `true` or `false`. Enables raw stream/stderr diagnostics in logs; use only while debugging. |
@@ -178,7 +179,7 @@ npm install -g @google/gemini-cli
 cp .env.example .env
 ```
 
-For a family/shared Ubuntu server, a practical state layout is:
+For a shared/multi-user Ubuntu server, a practical state layout is:
 
 ```env
 GATEWAY_STATE_DIR=/srv/gemini-gateway/state
@@ -301,9 +302,10 @@ scans that user's workspace/artifacts directories. Gemini CLI auth, `HOME`, MCP,
 skills, and global CLI settings remain shared because this mode intentionally
 keeps one server account and one Gemini login.
 
-`/init` asks a short questionnaire, stores the answers in `profile.json`, asks
-Gemini CLI to generate a Markdown preview, and writes `workspace/GEMINI.md` only
-after the user confirms it.
+`/init` asks five short questions, stores the answers in `profile.json`, asks
+Gemini CLI to generate a compact Markdown preview, validates that it is a
+personal-instructions file without server/tool internals, and writes
+`workspace/GEMINI.md` only after the user confirms it.
 
 `/sessions` uses `gemini --list-sessions`, parses the Gemini CLI 0.39.1 text
 format, reverses it so the newest chats appear first, and shows five dialogs per

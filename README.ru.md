@@ -125,6 +125,7 @@ python -m gateway.main --doctor-json
 | `GEMINI_INCLUDE_DIRECTORIES` | Нет | Дополнительные папки workspace через запятую, например `/srv/project/shared,/srv/docs`. Передаются как `--include-directories`. |
 | `GEMINI_ARTIFACT_ROOTS` | Нет | Где искать созданные файлы для отправки в Telegram. Несколько папок через запятую. По умолчанию используется `GEMINI_WORKING_DIR`. |
 | `GEMINI_CLI_TIMEOUT` | Нет | Сколько секунд ждать вывода от Gemini stdout перед остановкой процесса по таймауту. |
+| `GEMINI_STREAM_READER_LIMIT_BYTES` | Нет | Максимальный размер одной строки stdout/stderr Gemini. По умолчанию `8388608` (8 MiB); увеличьте, если Gemini выдаёт очень крупное `stream-json` событие. |
 | `GEMINI_SHUTDOWN_GRACE_SECONDS` | Нет | Сколько секунд ждать после мягкой остановки Gemini перед принудительным kill всего process group. |
 | `GEMINI_SANDBOX` | Нет | `true` или `false`. При `true` передаёт Gemini CLI флаг `--sandbox`. |
 | `GEMINI_STREAM_DEBUG` | Нет | `true` или `false`. Логирует raw stream/stderr Gemini; включайте только для диагностики. |
@@ -178,7 +179,7 @@ npm install -g @google/gemini-cli
 cp .env.example .env
 ```
 
-Для семейного/shared Ubuntu-сервера удобная раскладка состояния:
+Для shared/multi-user Ubuntu-сервера удобная раскладка состояния:
 
 ```env
 GATEWAY_STATE_DIR=/srv/gemini-gateway/state
@@ -302,9 +303,10 @@ workspace/artifacts текущего пользователя. Gemini CLI auth, 
 и глобальные CLI-настройки остаются общими, потому что этот режим специально
 сохраняет один серверный аккаунт и один Gemini login.
 
-`/init` задаёт короткую анкету, сохраняет ответы в `profile.json`, просит Gemini
-CLI сгенерировать Markdown-preview и записывает `workspace/GEMINI.md` только
-после подтверждения пользователя.
+`/init` задаёт пять коротких вопросов, сохраняет ответы в `profile.json`, просит
+Gemini CLI сгенерировать компактный Markdown-preview, проверяет что это личные
+инструкции без внутренних деталей сервера/tools, и записывает
+`workspace/GEMINI.md` только после подтверждения пользователя.
 
 `/sessions` использует `gemini --list-sessions`, разбирает текстовый формат
 Gemini CLI 0.39.1, разворачивает порядок так, чтобы новые диалоги были сверху,

@@ -73,7 +73,10 @@ class GatewayRuntimeState:
 
 
 async def probe_command(
-    command: str, *args: str, cwd: str | None = None
+    command: str,
+    *args: str,
+    cwd: str | None = None,
+    limit: int = 8 * 1024 * 1024,
 ) -> CommandProbe:
     executable = shutil.which(command) or command
     process = await asyncio.create_subprocess_exec(
@@ -82,6 +85,7 @@ async def probe_command(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        limit=limit,
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
@@ -127,6 +131,7 @@ async def startup_preflight(
         config.gemini_bin,
         "--version",
         cwd=config.gemini_working_dir,
+        limit=config.gemini_stream_reader_limit_bytes,
     )
     runtime_state.node_probe = await probe_command("node", "--version")
 
