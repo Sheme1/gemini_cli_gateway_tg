@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Any
@@ -159,6 +160,7 @@ async def process_gemini_prompt(
     initial_message_id: int | None = None,
     initial_text: str = "",
     skip_prompt_guard: bool = False,
+    extra_include_directories: tuple[str, ...] = (),
 ) -> None:
     """Общий pipeline потокового вывода для любых входящих запросов."""
     if usage_ledger is not None:
@@ -190,6 +192,7 @@ async def process_gemini_prompt(
                 chat_id=chat_id,
                 prompt=prompt,
                 ttl_seconds=config.prompt_confirm_timeout,
+                extra_include_directories=extra_include_directories,
             )
             await bot.send_message(
                 chat_id=chat_id,
@@ -338,23 +341,15 @@ async def process_gemini_prompt(
     prompt_task = None
     watcher_task = None
     try:
-        try:
-            prompt_coro = session_manager.send_prompt(
-                prompt=prompt,
-                user_id=user_id,
-                on_event=on_event,
-                on_approval=on_approval,
-                model=effective_model,
-            )
-        except TypeError as exc:
-            if "model" not in str(exc):
-                raise
-            prompt_coro = session_manager.send_prompt(
-                prompt=prompt,
-                user_id=user_id,
-                on_event=on_event,
-                on_approval=on_approval,
-            )
+        prompt_coro = _build_send_prompt_call(
+            session_manager=session_manager,
+            prompt=prompt,
+            user_id=user_id,
+            on_event=on_event,
+            on_approval=on_approval,
+            model=effective_model,
+            include_directories=extra_include_directories,
+        )
         prompt_task = asyncio.create_task(prompt_coro)
         watcher_task = asyncio.create_task(
             watch_artifacts_and_soft_finalize(prompt_task)
@@ -393,3 +388,31 @@ async def process_gemini_prompt(
                     exc,
                     exc_info=True,
                 )
+
+
+def _build_send_prompt_call(
+    *,
+    session_manager: SessionManager,
+    prompt: str,
+    user_id: int,
+    on_event,
+    on_approval,
+    model: str,
+    include_directories: tuple[str, ...],
+):
+    kwargs: dict[str, Any] = {}
+    try:
+        parameters = inspect.signature(session_manager.send_prompt).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "model" in parameters:
+        kwargs["model"] = model
+    if "include_directories" in parameters:
+        kwargs["include_directories"] = include_directories
+    return session_manager.send_prompt(
+        prompt=prompt,
+        user_id=user_id,
+        on_event=on_event,
+        on_approval=on_approval,
+        **kwargs,
+    )

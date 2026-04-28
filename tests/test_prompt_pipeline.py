@@ -193,6 +193,40 @@ async def test_process_prompt_warns_before_large_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_prompt_guard_preserves_extra_include_directories() -> None:
+    tmp_path = make_test_dir()
+    try:
+        bot = _FakeBot()
+        prompt_guard = PendingPromptStore()
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(tmp_path),
+            gemini_artifact_roots=(str(tmp_path),),
+            prompt_warn_chars=5,
+            prompt_max_chars=100,
+        )
+
+        await process_gemini_prompt(
+            bot=bot,
+            chat_id=1,
+            user_id=42,
+            prompt="long prompt",
+            session_manager=_CompletingSessionManager(tmp_path / "x.txt"),
+            config=config,
+            user_settings=_FakeUserSettings(),
+            prompt_guard=prompt_guard,
+            extra_include_directories=(str(tmp_path / "uploads"),),
+        )
+
+        token = next(iter(prompt_guard._items))
+        assert prompt_guard.get(token).extra_include_directories == (
+            str(tmp_path / "uploads"),
+        )
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_process_prompt_blocks_prompt_over_hard_limit() -> None:
     tmp_path = make_test_dir()
     try:

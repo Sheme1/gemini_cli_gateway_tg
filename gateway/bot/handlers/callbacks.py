@@ -382,6 +382,7 @@ async def callback_prompt_confirm(
         initial_message_id=callback.message.message_id,
         initial_text=initial_text,
         skip_prompt_guard=True,
+        extra_include_directories=item.extra_include_directories,
     )
 
 

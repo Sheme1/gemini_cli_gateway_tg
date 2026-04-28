@@ -50,6 +50,10 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         monkeypatch.setenv("PROMPT_WARN_CHARS", "99")
         monkeypatch.setenv("PROMPT_MAX_CHARS", "999")
         monkeypatch.setenv("PROMPT_CONFIRM_TIMEOUT", "33")
+        monkeypatch.setenv("ATTACHMENT_MAX_BYTES", "12345")
+        monkeypatch.setenv("ATTACHMENT_DOWNLOAD_TIMEOUT", "44")
+        monkeypatch.setenv("ATTACHMENT_RETENTION_DAYS", "3")
+        monkeypatch.setenv("ATTACHMENT_ALBUM_DEBOUNCE_SECONDS", "0.25")
         monkeypatch.setenv("USER_DAILY_TOKEN_LIMIT", "1000")
         monkeypatch.setenv("GLOBAL_DAILY_TOKEN_LIMIT", "2000")
         monkeypatch.setenv("GEMINI_STREAM_READER_LIMIT_BYTES", "123456")
@@ -94,6 +98,10 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.prompt_warn_chars == 99
         assert config.prompt_max_chars == 999
         assert config.prompt_confirm_timeout == 33
+        assert config.attachment_max_bytes == 12345
+        assert config.attachment_download_timeout == 44
+        assert config.attachment_retention_days == 3
+        assert config.attachment_album_debounce_seconds == 0.25
         assert config.user_daily_token_limit == 1000
         assert config.global_daily_token_limit == 2000
         assert config.gemini_stream_reader_limit_bytes == 123456
@@ -109,6 +117,7 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         )
         assert config.redacted_dict()["gateway_session_auto_resume_latest"] is False
         assert config.redacted_dict()["gemini_stream_reader_limit_bytes"] == 123456
+        assert config.redacted_dict()["attachment_max_bytes"] == 12345
         assert config.redacted_dict()["telegram_bot_token"] == "1234...oken"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
@@ -209,6 +218,7 @@ def test_readmes_document_multi_chat_id_and_update_flow() -> None:
         assert "TARGET_CHAT_ID=111111111,222222222" in text
         assert "GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES" in text
         assert "GEMINI_STREAM_READER_LIMIT_BYTES" in text
+        assert "ATTACHMENT_MAX_BYTES" in text
     for text in (readme_en, readme_ru):
         assert "update.sh" in text
         assert "git pull --ff-only" in text

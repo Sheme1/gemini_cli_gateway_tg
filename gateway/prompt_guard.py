@@ -11,6 +11,7 @@ class PendingPrompt:
     user_id: int
     chat_id: int
     prompt: str
+    extra_include_directories: tuple[str, ...]
     expires_at: float
 
 
@@ -27,6 +28,7 @@ class PendingPromptStore:
         chat_id: int,
         prompt: str,
         ttl_seconds: int,
+        extra_include_directories: tuple[str, ...] = (),
     ) -> PendingPrompt:
         self.cleanup()
         token = uuid.uuid4().hex[:16]
@@ -35,6 +37,7 @@ class PendingPromptStore:
             user_id=user_id,
             chat_id=chat_id,
             prompt=prompt,
+            extra_include_directories=tuple(extra_include_directories),
             expires_at=time.time() + max(1, ttl_seconds),
         )
         self._items[token] = item

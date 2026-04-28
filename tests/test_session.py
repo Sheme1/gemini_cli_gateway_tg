@@ -760,6 +760,54 @@ async def test_session_manager_generate_text_passes_stream_limit(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_session_manager_merges_dynamic_include_directories(monkeypatch) -> None:
+    captured_args = []
+    lines = [
+        json.dumps(
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {"total_tokens": 1, "duration_ms": 10},
+            }
+        ),
+    ]
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        captured_args.extend(args)
+        return _FakeProcess(lines)
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+        gemini_include_directories=("configured",),
+    )
+    manager = SessionManager(config)
+
+    async def on_event(_event):
+        return None
+
+    async def on_approval(_req):
+        raise AssertionError("approval request was not expected")
+
+    await manager.send_prompt(
+        prompt="test",
+        user_id=123,
+        on_event=on_event,
+        on_approval=on_approval,
+        include_directories=("uploads",),
+    )
+
+    include_index = captured_args.index("--include-directories")
+    assert captured_args[include_index + 1] == "configured,uploads"
+
+
+@pytest.mark.asyncio
 async def test_session_manager_generate_text_reports_stream_limit_error(
     monkeypatch,
 ) -> None:

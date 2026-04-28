@@ -877,6 +877,7 @@ class SessionManager:
         effective_model: str,
         *,
         approval_mode: str | None = None,
+        include_directories: tuple[str, ...] = (),
     ) -> list[str]:
         args = [
             self._gemini_executable(),
@@ -893,13 +894,31 @@ class SessionManager:
         else:
             args.extend(self.config.approval_mode_flag)
         args.extend(self.config.sandbox_flag)
-        args.extend(self.config.include_directories_flag)
+        args.extend(self._include_directories_flag(include_directories))
         args.extend(self.config.policy_flags)
         args.extend(self.config.admin_policy_flags)
         args.extend(self.config.allowed_mcp_server_names_flag)
         args.extend(self.config.extensions_flag)
         args.extend(self.config.screen_reader_flag)
         return args
+
+    def _include_directories_flag(
+        self,
+        include_directories: tuple[str, ...] = (),
+    ) -> list[str]:
+        directories = tuple(
+            dict.fromkeys(
+                directory
+                for directory in (
+                    *self.config.gemini_include_directories,
+                    *include_directories,
+                )
+                if directory
+            )
+        )
+        if not directories:
+            return []
+        return ["--include-directories", ",".join(directories)]
 
     async def _heartbeat_loop(
         self,
@@ -1215,6 +1234,7 @@ class SessionManager:
         on_event: StreamCallback,
         on_approval: ApprovalCallback,
         model: str | None = None,
+        include_directories: tuple[str, ...] = (),
     ) -> None:
         """Отправить промпт в одноразовый процесс и стримить ответ."""
         lock = self._prompt_locks.setdefault(user_id, asyncio.Lock())
@@ -1237,6 +1257,7 @@ class SessionManager:
                 on_event,
                 on_approval,
                 model=model,
+                include_directories=include_directories,
             )
 
     async def _send_prompt_locked(
@@ -1246,10 +1267,15 @@ class SessionManager:
         on_event: StreamCallback,
         on_approval: ApprovalCallback,
         model: str | None = None,
+        include_directories: tuple[str, ...] = (),
     ) -> None:
         _ = on_approval
         effective_model = model or self.config.gemini_model
-        args = self._build_prompt_args(prompt, effective_model)
+        args = self._build_prompt_args(
+            prompt,
+            effective_model,
+            include_directories=include_directories,
+        )
 
         resume_decision = await self._resolve_resume_decision(user_id)
         if resume_decision.session_ref:

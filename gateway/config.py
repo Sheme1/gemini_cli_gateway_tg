@@ -58,6 +58,12 @@ class Config:
     prompt_max_chars: int = 60000
     prompt_confirm_timeout: int = 120
 
+    # === Telegram attachments ===
+    attachment_max_bytes: int = 20 * 1024 * 1024
+    attachment_download_timeout: int = 60
+    attachment_retention_days: int = 7
+    attachment_album_debounce_seconds: float = 1.0
+
     # === Usage limits ===
     user_daily_token_limit: int = 0
     global_daily_token_limit: int = 0
@@ -212,6 +218,27 @@ class Config:
                     str(cls.prompt_confirm_timeout),
                 )
             ),
+            attachment_max_bytes=int(
+                os.getenv("ATTACHMENT_MAX_BYTES", str(cls.attachment_max_bytes))
+            ),
+            attachment_download_timeout=int(
+                os.getenv(
+                    "ATTACHMENT_DOWNLOAD_TIMEOUT",
+                    str(cls.attachment_download_timeout),
+                )
+            ),
+            attachment_retention_days=int(
+                os.getenv(
+                    "ATTACHMENT_RETENTION_DAYS",
+                    str(cls.attachment_retention_days),
+                )
+            ),
+            attachment_album_debounce_seconds=float(
+                os.getenv(
+                    "ATTACHMENT_ALBUM_DEBOUNCE_SECONDS",
+                    str(cls.attachment_album_debounce_seconds),
+                )
+            ),
             user_daily_token_limit=int(
                 os.getenv(
                     "USER_DAILY_TOKEN_LIMIT",
@@ -280,6 +307,12 @@ class Config:
             "prompt_warn_chars": self.prompt_warn_chars,
             "prompt_max_chars": self.prompt_max_chars,
             "prompt_confirm_timeout": self.prompt_confirm_timeout,
+            "attachment_max_bytes": self.attachment_max_bytes,
+            "attachment_download_timeout": self.attachment_download_timeout,
+            "attachment_retention_days": self.attachment_retention_days,
+            "attachment_album_debounce_seconds": (
+                self.attachment_album_debounce_seconds
+            ),
             "user_daily_token_limit": self.user_daily_token_limit,
             "global_daily_token_limit": self.global_daily_token_limit,
             "polling_timeout": self.polling_timeout,

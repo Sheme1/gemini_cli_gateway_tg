@@ -41,6 +41,7 @@ Gemini CLI is great in the terminal, but sometimes you want that same workflow f
 - Per-user model presets: `auto`, `pro`, `flash`, `flash-lite`, plus legacy manual presets
 - Experimental per-user workspaces and personal `GEMINI.md` via `/init`
 - Oversized prompt confirmation and daily token usage tracking
+- Incoming attachments: photos, PDFs, DOCX, audio/video, and other Telegram files
 - Voice message transcription through Gemini API
 - Automatic artifact discovery and file delivery
 - Runtime diagnostics, local `doctor`, latency timings, and `/cancel`
@@ -139,6 +140,10 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `PROMPT_WARN_CHARS` | No | Prompt length that triggers an inline confirmation before sending to Gemini. |
 | `PROMPT_MAX_CHARS` | No | Hard prompt length limit. Requests above this value are rejected before starting Gemini. |
 | `PROMPT_CONFIRM_TIMEOUT` | No | Seconds before an oversized prompt confirmation expires. |
+| `ATTACHMENT_MAX_BYTES` | No | Max bytes for one incoming Telegram attachment. Defaults to `20971520` (20 MiB), matching the Bot API download limit. |
+| `ATTACHMENT_DOWNLOAD_TIMEOUT` | No | Seconds to wait while downloading one Telegram attachment. |
+| `ATTACHMENT_RETENTION_DAYS` | No | Days to keep downloaded input files under `GATEWAY_STATE_DIR/uploads`. Defaults to `7`. |
+| `ATTACHMENT_ALBUM_DEBOUNCE_SECONDS` | No | Seconds to wait for the remaining Telegram media-group items before sending one combined Gemini prompt. |
 | `USER_DAILY_TOKEN_LIMIT` | No | Per-user daily token limit from Gemini result stats. `0` disables the limit. |
 | `GLOBAL_DAILY_TOKEN_LIMIT` | No | Global daily token limit from Gemini result stats. `0` disables the limit. |
 | `POLLING_TIMEOUT` | No | Telegram long-polling timeout passed to aiogram. |
@@ -286,6 +291,14 @@ This gateway currently uses a headless request model:
 4. later prompts continue the same context with `--resume`, including after `systemctl restart` or `update.sh`
 
 That keeps conversations continuous without depending on one forever-running subprocess.
+
+Incoming Telegram attachments are saved under `GATEWAY_STATE_DIR/uploads`, not
+inside `GEMINI_WORKING_DIR`. The gateway passes the per-request upload directory
+to Gemini CLI through `--include-directories` and adds file paths plus metadata to
+the prompt. Images, PDFs, audio, and video are handled by Gemini CLI's native
+file reading. DOCX and text-like files also get a `.txt` sidecar extracted by the
+gateway. Other binary files are accepted up to the Telegram Bot API download
+limit, but Gemini may only be able to use their metadata.
 
 When `GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES=true`, the gateway resolves a
 separate filesystem scope for every Telegram `from_user.id`:
