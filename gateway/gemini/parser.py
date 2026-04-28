@@ -246,6 +246,145 @@ def _is_thought_payload(data: dict[str, Any]) -> bool:
     return False
 
 
+def _parse_init_event(data: dict[str, Any]) -> StreamEvent:
+    session_id = data.get("session_id")
+    logger.info(
+        "Gemini session init: id=%s, model=%s",
+        session_id,
+        data.get("model"),
+    )
+    return StreamEvent(event_type="init", session_id=session_id)
+
+
+def _parse_message_event(data: dict[str, Any]) -> StreamEvent:
+    role = data.get("role", "")
+    if role != "assistant" or _is_thought_payload(data):
+        return StreamEvent()
+
+    content = _stringify_payload(data.get("content"))
+    if content == "":
+        return StreamEvent()
+
+    direct_candidates = [
+        _normalize_path_candidate(match) for match in _SEND_FILE_RE.findall(content)
+    ]
+    content = _SEND_FILE_RE.sub("", content)
+    inferred_candidates = _extract_file_candidates(content)
+
+    return StreamEvent(
+        event_type="assistant_text",
+        assistant_text=content,
+        message_delta=bool(data.get("delta")),
+        file_candidates=_dedupe([*direct_candidates, *inferred_candidates]),
+        direct_file_candidates=_dedupe(direct_candidates),
+    )
+
+
+def _parse_tool_use_event(data: dict[str, Any]) -> StreamEvent:
+    tool_name = _stringify_payload(data.get("tool_name") or data.get("name")).strip()
+    tool_id = _stringify_payload(data.get("tool_id")).strip()
+    args_preview = _stringify_payload(data.get("parameters", data.get("args")))
+    if len(args_preview) > 400:
+        args_preview = args_preview[:400].rstrip() + "..."
+    return StreamEvent(
+        event_type="tool_use",
+        tool_id=tool_id,
+        tool_name=tool_name,
+        tool_args_preview=args_preview,
+        file_candidates=_extract_file_candidates(args_preview),
+    )
+
+
+def _parse_tool_result_event(data: dict[str, Any]) -> StreamEvent:
+    tool_id = _stringify_payload(data.get("tool_id")).strip()
+    tool_name = _stringify_payload(data.get("tool_name") or data.get("name")).strip()
+    tool_status = _stringify_payload(data.get("status")).strip().lower()
+
+    output_value = data.get("output")
+    error_value = data.get("error")
+    output_preview = _stringify_payload(output_value)
+    error_preview = _stringify_payload(error_value)
+    if not output_preview and error_preview:
+        output_preview = error_preview
+    if len(output_preview) > 700:
+        output_preview = output_preview[:700].rstrip() + "..."
+    return StreamEvent(
+        event_type="tool_result",
+        tool_id=tool_id,
+        tool_name=tool_name,
+        tool_status=tool_status,
+        tool_output_preview=output_preview,
+        file_candidates=_dedupe(
+            [
+                *_extract_file_candidates(_stringify_payload(output_value)),
+                *_extract_file_candidates(_stringify_payload(error_value)),
+            ]
+        ),
+    )
+
+
+def _parse_approval_event(data: dict[str, Any]) -> StreamEvent:
+    return StreamEvent(event_type="approval_request", approval_request=data)
+
+
+def _parse_result_event(data: dict[str, Any]) -> StreamEvent:
+    stats = data.get("stats", {}) if isinstance(data.get("stats"), dict) else {}
+    total_tokens = _extract_total_tokens(stats)
+    duration_ms = _extract_duration_ms(stats)
+    thoughts_tokens = _extract_thoughts_tokens(stats)
+    result_status = _stringify_payload(data.get("status")).strip().lower()
+    is_empty = total_tokens == 0 or (
+        thoughts_tokens > 0 and total_tokens == thoughts_tokens
+    )
+
+    if is_empty:
+        logger.warning(
+            "Detected empty response: total=%s, thoughts=%s",
+            total_tokens,
+            thoughts_tokens,
+        )
+
+    return StreamEvent(
+        event_type="result_stats",
+        total_tokens=total_tokens,
+        duration_ms=duration_ms,
+        thoughts_tokens=thoughts_tokens,
+        stats=stats,
+        result_status=result_status,
+        is_done=True,
+        is_empty_response=is_empty,
+    )
+
+
+def _parse_error_event(data: dict[str, Any]) -> StreamEvent:
+    exit_code = data.get("exit_code", data.get("exitCode"))
+    return StreamEvent(
+        event_type="error",
+        error_message=_extract_error_message(data),
+        error_code=_extract_error_code(data),
+        exit_code=_int_from_payload(exit_code) if exit_code is not None else None,
+    )
+
+
+def _parse_invalid_stream_event(data: dict[str, Any]) -> StreamEvent:
+    reason = _stringify_payload(data.get("reason", "UNKNOWN"))
+    logger.warning("InvalidStream event: reason=%s", reason)
+    return StreamEvent(event_type="invalid_stream", invalid_stream_reason=reason)
+
+
+_EVENT_PARSERS = {
+    "init": _parse_init_event,
+    "message": _parse_message_event,
+    "tool_use": _parse_tool_use_event,
+    "tool_result": _parse_tool_result_event,
+    "approval_request": _parse_approval_event,
+    "confirmation_request": _parse_approval_event,
+    "result": _parse_result_event,
+    "error": _parse_error_event,
+    "invalid_stream": _parse_invalid_stream_event,
+}
+
+
 class GeminiStreamParser:
     """Парсер для --output-format stream-json Gemini CLI."""
 
@@ -269,138 +408,9 @@ class GeminiStreamParser:
             return StreamEvent()
 
         raw_type = data.get("type", "")
-
-        if raw_type == "init":
-            session_id = data.get("session_id")
-            logger.info(
-                "Gemini session init: id=%s, model=%s",
-                session_id,
-                data.get("model"),
-            )
-            return StreamEvent(event_type="init", session_id=session_id)
-
-        if raw_type == "message":
-            role = data.get("role", "")
-            if role != "assistant" or _is_thought_payload(data):
-                return StreamEvent()
-
-            content = _stringify_payload(data.get("content"))
-            if content == "":
-                return StreamEvent()
-
-            direct_candidates = [
-                _normalize_path_candidate(match)
-                for match in _SEND_FILE_RE.findall(content)
-            ]
-            content = _SEND_FILE_RE.sub("", content)
-            inferred_candidates = _extract_file_candidates(content)
-
-            return StreamEvent(
-                event_type="assistant_text",
-                assistant_text=content,
-                message_delta=bool(data.get("delta")),
-                file_candidates=_dedupe([*direct_candidates, *inferred_candidates]),
-                direct_file_candidates=_dedupe(direct_candidates),
-            )
-
-        if raw_type == "tool_use":
-            tool_name = _stringify_payload(
-                data.get("tool_name") or data.get("name")
-            ).strip()
-            tool_id = _stringify_payload(data.get("tool_id")).strip()
-            args_preview = _stringify_payload(data.get("parameters", data.get("args")))
-            if len(args_preview) > 400:
-                args_preview = args_preview[:400].rstrip() + "..."
-            return StreamEvent(
-                event_type="tool_use",
-                tool_id=tool_id,
-                tool_name=tool_name,
-                tool_args_preview=args_preview,
-                file_candidates=_extract_file_candidates(args_preview),
-            )
-
-        if raw_type == "tool_result":
-            tool_id = _stringify_payload(data.get("tool_id")).strip()
-            tool_name = _stringify_payload(
-                data.get("tool_name") or data.get("name")
-            ).strip()
-            tool_status = _stringify_payload(data.get("status")).strip().lower()
-
-            output_value = data.get("output")
-            error_value = data.get("error")
-            output_preview = _stringify_payload(output_value)
-            error_preview = _stringify_payload(error_value)
-            if not output_preview and error_preview:
-                output_preview = error_preview
-            if len(output_preview) > 700:
-                output_preview = output_preview[:700].rstrip() + "..."
-            return StreamEvent(
-                event_type="tool_result",
-                tool_id=tool_id,
-                tool_name=tool_name,
-                tool_status=tool_status,
-                tool_output_preview=output_preview,
-                file_candidates=_dedupe(
-                    [
-                        *_extract_file_candidates(_stringify_payload(output_value)),
-                        *_extract_file_candidates(_stringify_payload(error_value)),
-                    ]
-                ),
-            )
-
-        if raw_type in {"approval_request", "confirmation_request"}:
-            request_payload = data if isinstance(data, dict) else None
-            return StreamEvent(
-                event_type="approval_request",
-                approval_request=request_payload,
-            )
-
-        if raw_type == "result":
-            stats = data.get("stats", {}) if isinstance(data.get("stats"), dict) else {}
-            total_tokens = _extract_total_tokens(stats)
-            duration_ms = _extract_duration_ms(stats)
-            thoughts_tokens = _extract_thoughts_tokens(stats)
-            result_status = _stringify_payload(data.get("status")).strip().lower()
-            is_empty = total_tokens == 0 or (
-                thoughts_tokens > 0 and total_tokens == thoughts_tokens
-            )
-
-            if is_empty:
-                logger.warning(
-                    "Detected empty response: total=%s, thoughts=%s",
-                    total_tokens,
-                    thoughts_tokens,
-                )
-
-            return StreamEvent(
-                event_type="result_stats",
-                total_tokens=total_tokens,
-                duration_ms=duration_ms,
-                thoughts_tokens=thoughts_tokens,
-                stats=stats,
-                result_status=result_status,
-                is_done=True,
-                is_empty_response=is_empty,
-            )
-
-        if raw_type == "error":
-            exit_code = data.get("exit_code", data.get("exitCode"))
-            return StreamEvent(
-                event_type="error",
-                error_message=_extract_error_message(data),
-                error_code=_extract_error_code(data),
-                exit_code=_int_from_payload(exit_code)
-                if exit_code is not None
-                else None,
-            )
-
-        if raw_type == "invalid_stream":
-            reason = _stringify_payload(data.get("reason", "UNKNOWN"))
-            logger.warning("InvalidStream event: reason=%s", reason)
-            return StreamEvent(
-                event_type="invalid_stream",
-                invalid_stream_reason=reason,
-            )
+        parser = _EVENT_PARSERS.get(raw_type)
+        if parser:
+            return parser(data)
 
         logger.debug(
             "[UNKNOWN EVENT] type=%s payload=%s",

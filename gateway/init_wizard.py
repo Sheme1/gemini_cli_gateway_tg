@@ -235,21 +235,33 @@ def sanitize_gemini_md(markdown: str) -> str:
 
 def _validate_gemini_md(markdown: str) -> None:
     text = markdown.strip()
+    _validate_non_empty_gemini_md(text)
+    _validate_gemini_md_header(text)
+    _validate_gemini_md_bullets(text)
+    _validate_gemini_md_terms(text)
+
+
+def _validate_non_empty_gemini_md(text: str) -> None:
     if not text:
         raise ValueError("Gemini вернул пустой preview GEMINI.md.")
     if "```" in text:
         raise ValueError("Gemini вернул preview с code fence.")
+
+
+def _validate_gemini_md_header(text: str) -> None:
     if not text.startswith("# Личные инструкции"):
         raise ValueError("Gemini вернул preview не в формате '# Личные инструкции'.")
 
-    bullet_count = sum(
-        1 for line in text.splitlines() if line.lstrip().startswith(("- ", "* "))
-    )
+
+def _validate_gemini_md_bullets(text: str) -> None:
+    bullet_count = _count_markdown_bullets(text)
     if bullet_count < 5 or bullet_count > 8:
         raise ValueError(
             "Gemini вернул preview не в формате 5-8 коротких Markdown bullets."
         )
 
+
+def _validate_gemini_md_terms(text: str) -> None:
     lowered = text.lower()
     forbidden = [term for term in _FORBIDDEN_GEMINI_MD_TERMS if term in lowered]
     if forbidden:
@@ -257,6 +269,12 @@ def _validate_gemini_md(markdown: str) -> None:
             "Gemini вернул preview с лишним системным или выдуманным контекстом: "
             + ", ".join(sorted(set(forbidden))[:5])
         )
+
+
+def _count_markdown_bullets(text: str) -> int:
+    return sum(
+        1 for line in text.splitlines() if line.lstrip().startswith(("- ", "* "))
+    )
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

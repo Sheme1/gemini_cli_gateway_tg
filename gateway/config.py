@@ -88,83 +88,25 @@ class Config:
         require_telegram_token: bool = True,
     ) -> Config:
         """Загрузить конфигурацию из .env файла и переменных окружения."""
-        if env_path:
-            load_dotenv(env_path)
-        else:
-            load_dotenv()
+        _load_env_file(env_path)
 
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not token:
-            if require_telegram_token:
-                raise ValueError(
-                    "TELEGRAM_BOT_TOKEN не задан. "
-                    "Укажите его в .env файле или переменной окружения."
-                )
-            token = "__missing_telegram_bot_token__"
+        token = _read_telegram_token(require_telegram_token)
 
-        # Парсинг TARGET_CHAT_ID
         target_chat_ids = _parse_target_chat_ids(os.getenv("TARGET_CHAT_ID", ""))
         target_chat_id = target_chat_ids[0] if target_chat_ids else None
 
-        # Парсинг GEMINI_SANDBOX
         sandbox = _parse_bool(os.getenv("GEMINI_SANDBOX"), default=False)
-
-        # Парсинг GEMINI_STREAM_DEBUG
         stream_debug = _parse_bool(os.getenv("GEMINI_STREAM_DEBUG"), default=False)
-
-        # Парсинг GEMINI_SKIP_TRUST
         skip_trust = _parse_bool(os.getenv("GEMINI_SKIP_TRUST"), default=True)
-
-        # Парсинг GEMINI_SCREEN_READER
         screen_reader = _parse_bool(os.getenv("GEMINI_SCREEN_READER"), default=False)
 
-        # Парсинг GEMINI_WORKING_DIR
-        working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
-        working_dir = (
-            Path(working_dir_raw).expanduser().resolve()
-            if working_dir_raw
-            else Path.home()
-        )
-        if not working_dir.exists() or not working_dir.is_dir():
-            raise ValueError(
-                f"Директория GEMINI_WORKING_DIR='{working_dir}' не существует "
-                "или не является папкой. Проверьте настройки в .env файле."
-            )
-
+        working_dir = _parse_working_dir()
         include_directories = _parse_existing_directories(
             os.getenv("GEMINI_INCLUDE_DIRECTORIES", ""),
             "GEMINI_INCLUDE_DIRECTORIES",
         )
-
-        artifact_roots_raw = os.getenv("GEMINI_ARTIFACT_ROOTS", "").strip()
-        artifact_roots: list[str] = []
-        if artifact_roots_raw:
-            for raw_root in artifact_roots_raw.split(","):
-                root = raw_root.strip()
-                if not root:
-                    continue
-                resolved = Path(root).expanduser().resolve()
-                if not resolved.exists() or not resolved.is_dir():
-                    raise ValueError(
-                        f"Директория GEMINI_ARTIFACT_ROOTS='{resolved}' не существует "
-                        "или не является папкой. Проверьте настройки в .env файле."
-                    )
-                artifact_roots.append(str(resolved))
-        else:
-            artifact_roots.append(str(working_dir))
-
-        state_dir_raw = os.getenv("GATEWAY_STATE_DIR", ".gateway_state").strip()
-        state_dir = Path(state_dir_raw or ".gateway_state").expanduser().resolve()
-        multi_user_workspaces = _parse_bool(
-            os.getenv("GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES"),
-            default=False,
-        )
-        user_workspaces_raw = os.getenv("GATEWAY_USER_WORKSPACES_DIR", "").strip()
-        user_workspaces_dir = (
-            Path(user_workspaces_raw).expanduser().resolve()
-            if user_workspaces_raw
-            else state_dir / "users"
-        )
+        artifact_roots = _parse_artifact_roots(working_dir)
+        state_dir, multi_user_workspaces, user_workspaces_dir = _parse_state_paths()
 
         return cls(
             telegram_bot_token=token,
@@ -440,6 +382,68 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in {"true", "1", "yes", "on"}
 
 
+def _load_env_file(env_path: Optional[str]) -> None:
+    if env_path:
+        load_dotenv(env_path)
+    else:
+        load_dotenv()
+
+
+def _read_telegram_token(require_telegram_token: bool) -> str:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if token:
+        return token
+    if require_telegram_token:
+        raise ValueError(
+            "TELEGRAM_BOT_TOKEN не задан. "
+            "Укажите его в .env файле или переменной окружения."
+        )
+    return "__missing_telegram_bot_token__"
+
+
+def _parse_working_dir() -> Path:
+    working_dir_raw = os.getenv("GEMINI_WORKING_DIR", "").strip()
+    working_dir = (
+        Path(working_dir_raw).expanduser().resolve() if working_dir_raw else Path.home()
+    )
+    _ensure_existing_directory(working_dir, "GEMINI_WORKING_DIR")
+    return working_dir
+
+
+def _parse_artifact_roots(working_dir: Path) -> list[str]:
+    artifact_roots_raw = os.getenv("GEMINI_ARTIFACT_ROOTS", "").strip()
+    if not artifact_roots_raw:
+        return [str(working_dir)]
+
+    artifact_roots: list[str] = []
+    for raw_root in artifact_roots_raw.split(","):
+        root = raw_root.strip()
+        if not root:
+            continue
+        resolved = Path(root).expanduser().resolve()
+        _ensure_existing_directory(resolved, "GEMINI_ARTIFACT_ROOTS")
+        artifact_roots.append(str(resolved))
+    return artifact_roots
+
+
+def _parse_state_paths(
+    default_state_dir: str = ".gateway_state",
+) -> tuple[Path, bool, Path]:
+    state_dir_raw = os.getenv("GATEWAY_STATE_DIR", default_state_dir).strip()
+    state_dir = Path(state_dir_raw or default_state_dir).expanduser().resolve()
+    multi_user_workspaces = _parse_bool(
+        os.getenv("GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES"),
+        default=False,
+    )
+    user_workspaces_raw = os.getenv("GATEWAY_USER_WORKSPACES_DIR", "").strip()
+    user_workspaces_dir = (
+        Path(user_workspaces_raw).expanduser().resolve()
+        if user_workspaces_raw
+        else state_dir / "users"
+    )
+    return state_dir, multi_user_workspaces, user_workspaces_dir
+
+
 def _normalize_approval_mode(value: str | None) -> str:
     normalized = (value or "yolo").strip().lower()
     if normalized in {"default", "auto_edit", "yolo", "plan"}:
@@ -495,10 +499,15 @@ def _parse_existing_directories(raw_value: str, env_name: str) -> list[str]:
         if not path:
             continue
         resolved = Path(path).expanduser().resolve()
-        if not resolved.exists() or not resolved.is_dir():
-            raise ValueError(
-                f"Директория {env_name}='{resolved}' не существует "
-                "или не является папкой. Проверьте настройки в .env файле."
-            )
+        _ensure_existing_directory(resolved, env_name)
         directories.append(str(resolved))
     return directories
+
+
+def _ensure_existing_directory(path: Path, env_name: str) -> None:
+    if path.exists() and path.is_dir():
+        return
+    raise ValueError(
+        f"Директория {env_name}='{path}' не существует "
+        "или не является папкой. Проверьте настройки в .env файле."
+    )

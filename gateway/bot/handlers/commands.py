@@ -1,4 +1,5 @@
 import aiogram
+from collections.abc import Awaitable, Callable
 from aiogram import Router, html
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
@@ -169,69 +170,40 @@ async def command_mcp_handler(
     """Обработчик команды /mcp."""
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
-        # Просто показывает список
-        await message.answer(
-            "⏳ <i>Загружаю список MCP-серверов...</i>", parse_mode="HTML"
+        servers = await _load_capability_list(
+            message,
+            loader=session_manager.get_mcp_list,
+            loading_text="⏳ <i>Загружаю список MCP-серверов...</i>",
         )
-        servers = await session_manager.get_mcp_list()
-        is_shared = config.gateway_experimental_multi_user_workspaces
-
-        # Fallback для пустого списка
-        if not servers:
-            await message.answer(
-                "🔌 <b>MCP-серверы не найдены</b>\n\n"
-                "Установите их через <code>gemini mcp install</code>.",
-                parse_mode="HTML",
-            )
-            return
-
-        text = "🔌 <b>Установленные MCP-серверы:</b>\n\n"
-        if is_shared:
-            text += (
-                "⚠️ Experimental multi-user mode включён: MCP-конфигурация общая "
-                "для всего systemd-пользователя. Переключатели скрыты.\n\n"
-            )
-        for name, enabled in servers:
-            icon = "🟢" if enabled else "🔴"
-            status_text = "" if enabled else " <i>(отключен)</i>"
-            text += f"{icon} <code>{name}</code>{status_text}\n"
-
-        text += (
-            "\n💡 Включайте и выключайте их кнопками ниже.\n"
-            "Reload в интерактивном CLI недоступен как headless subcommand; "
-            "кнопка перечитывает список.\n"
-            "Чтобы задействовать MCP в запросе, напишите: "
-            "<code>/mcp имя_сервера запрос</code>\n"
-            "Или просто упомяните <code>@имя_сервера</code> в сообщении."
-        )
-        await message.answer(
-            text,
-            reply_markup=inline.get_mcp_list_keyboard(
-                servers,
-                allow_toggle=not is_shared,
+        await _answer_capability_list(
+            message,
+            config=config,
+            items=servers,
+            icon="🔌",
+            title="Установленные MCP-серверы",
+            empty_title="MCP-серверы не найдены",
+            install_command="gemini mcp install",
+            shared_label="MCP-конфигурация",
+            keyboard_builder=inline.get_mcp_list_keyboard,
+            usage_hint=(
+                "Чтобы задействовать MCP в запросе, напишите: "
+                "<code>/mcp имя_сервера запрос</code>\n"
+                "Или просто упомяните <code>@имя_сервера</code> в сообщении."
             ),
-            parse_mode="HTML",
         )
         return
 
-    # Вызов сервера с параметрами
-    payload = args[1].split(maxsplit=1)
-    server_name = payload[0]
-    prompt = payload[1] if len(payload) > 1 else ""
-
-    gemini_prompt = f"@{server_name} {prompt}"
-    from gateway.bot.handlers.messages import process_gemini_prompt
-
-    await process_gemini_prompt(
+    prefix, prompt = _split_capability_payload(args[1])
+    await _run_prefixed_prompt(
         bot,
-        message.chat.id,
-        message.from_user.id,
-        gemini_prompt,
+        message,
+        prefix,
+        prompt,
         session_manager,
         config,
         user_settings,
-        usage_ledger=usage_ledger,
-        prompt_guard=prompt_guard,
+        usage_ledger,
+        prompt_guard,
     )
 
 
@@ -248,61 +220,137 @@ async def command_skills_handler(
     """Обработчик команды /skills."""
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
-        await message.answer(
-            "⏳ <i>Запрашиваю список навыков...</i>", parse_mode="HTML"
+        skills = await _load_capability_list(
+            message,
+            loader=session_manager.get_skills_list,
+            loading_text="⏳ <i>Запрашиваю список навыков...</i>",
         )
-        skills = await session_manager.get_skills_list()
-        is_shared = config.gateway_experimental_multi_user_workspaces
-
-        # Fallback для пустого списка
-        if not skills:
-            await message.answer(
-                "🧠 <b>Навыки не найдены</b>\n\n"
-                "Установите их через <code>gemini skills install</code>.",
-                parse_mode="HTML",
-            )
-            return
-
-        text = "🧠 <b>Установленные навыки:</b>\n\n"
-        if is_shared:
-            text += (
-                "⚠️ Experimental multi-user mode включён: skills-конфигурация общая "
-                "для всего systemd-пользователя. Переключатели скрыты.\n\n"
-            )
-        for name, enabled in skills:
-            icon = "🟢" if enabled else "🔴"
-            status_text = "" if enabled else " <i>(отключен)</i>"
-            text += f"{icon} <code>{name}</code>{status_text}\n"
-
-        text += (
-            "\n💡 Включайте и выключайте навыки кнопками ниже.\n"
-            "Reload в интерактивном CLI недоступен как headless subcommand; "
-            "кнопка перечитывает список.\n"
-            "Чтобы принудительно запустить навык, напишите: "
-            "<code>/skills имя_навыка запрос</code>"
-        )
-        await message.answer(
-            text,
-            reply_markup=inline.get_skills_list_keyboard(
-                skills,
-                allow_toggle=not is_shared,
+        await _answer_capability_list(
+            message,
+            config=config,
+            items=skills,
+            icon="🧠",
+            title="Установленные навыки",
+            empty_title="Навыки не найдены",
+            install_command="gemini skills install",
+            shared_label="skills-конфигурация",
+            keyboard_builder=inline.get_skills_list_keyboard,
+            usage_hint=(
+                "Чтобы принудительно запустить навык, напишите: "
+                "<code>/skills имя_навыка запрос</code>"
             ),
+        )
+        return
+
+    prefix, prompt = _split_capability_payload(args[1])
+    await _run_prefixed_prompt(
+        bot,
+        message,
+        prefix,
+        prompt,
+        session_manager,
+        config,
+        user_settings,
+        usage_ledger,
+        prompt_guard,
+    )
+
+
+async def _load_capability_list(
+    message: Message,
+    *,
+    loader: Callable[[], Awaitable[list[tuple[str, bool]]]],
+    loading_text: str,
+) -> list[tuple[str, bool]]:
+    await message.answer(loading_text, parse_mode="HTML")
+    return await loader()
+
+
+async def _answer_capability_list(
+    message: Message,
+    *,
+    config: Config,
+    items: list[tuple[str, bool]],
+    icon: str,
+    title: str,
+    empty_title: str,
+    install_command: str,
+    shared_label: str,
+    keyboard_builder: Callable[..., object],
+    usage_hint: str,
+) -> None:
+    if not items:
+        await message.answer(
+            f"{icon} <b>{empty_title}</b>\n\n"
+            f"Установите их через <code>{install_command}</code>.",
             parse_mode="HTML",
         )
         return
 
-    payload = args[1].split(maxsplit=1)
-    skill_name = payload[0]
-    prompt = payload[1] if len(payload) > 1 else ""
+    is_shared = config.gateway_experimental_multi_user_workspaces
+    text = f"{icon} <b>{title}:</b>\n\n"
+    if is_shared:
+        text += (
+            "⚠️ Experimental multi-user mode включён: "
+            f"{shared_label} общая для всего systemd-пользователя. "
+            "Переключатели скрыты.\n\n"
+        )
+    text += _format_capability_items(items)
+    text += _capability_footer(allow_toggle=not is_shared, usage_hint=usage_hint)
 
-    gemini_prompt = f"@{skill_name} {prompt}"
+    await message.answer(
+        text,
+        reply_markup=keyboard_builder(items, allow_toggle=not is_shared),
+        parse_mode="HTML",
+    )
+
+
+def _format_capability_items(items: list[tuple[str, bool]]) -> str:
+    lines = []
+    for name, enabled in items:
+        icon = "🟢" if enabled else "🔴"
+        status_text = "" if enabled else " <i>(отключен)</i>"
+        lines.append(f"{icon} <code>{html.quote(name)}</code>{status_text}")
+    return "\n".join(lines) + "\n"
+
+
+def _capability_footer(*, allow_toggle: bool, usage_hint: str) -> str:
+    action_line = (
+        "💡 Включайте и выключайте кнопками ниже."
+        if allow_toggle
+        else "💡 Кнопка reload перечитывает список."
+    )
+    return (
+        f"\n{action_line}\n"
+        "Reload в интерактивном CLI недоступен как headless subcommand; "
+        "кнопка перечитывает список.\n"
+        f"{usage_hint}"
+    )
+
+
+def _split_capability_payload(payload: str) -> tuple[str, str]:
+    parts = payload.split(maxsplit=1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+async def _run_prefixed_prompt(
+    bot: aiogram.Bot,
+    message: Message,
+    prefix: str,
+    prompt: str,
+    session_manager: SessionManager,
+    config: Config,
+    user_settings: UserSettingsStore,
+    usage_ledger: UsageLedger,
+    prompt_guard: PendingPromptStore,
+) -> None:
     from gateway.bot.handlers.messages import process_gemini_prompt
 
     await process_gemini_prompt(
         bot,
         message.chat.id,
         message.from_user.id,
-        gemini_prompt,
+        f"@{prefix} {prompt}",
         session_manager,
         config,
         user_settings,

@@ -6,8 +6,8 @@ import signal
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable
 
 from gateway.config import Config
 from gateway.gemini.error_classifier import classify_gemini_error
@@ -95,6 +95,65 @@ def _is_session_list_noise(line: str) -> bool:
     )
 
 
+def _parse_mcp_list_lines(lines: list[str]) -> list[tuple[str, bool]]:
+    servers: list[tuple[str, bool]] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or "Configured MCP servers:" in line or "Loaded cached" in line:
+            continue
+
+        match = re.search(r"^([✓✗xX])\s+([a-zA-Z0-9_\-]+)(?:\s+\(from [^)]+\))?:", line)
+        if not match:
+            continue
+
+        status_icon = match.group(1).strip()
+        name = match.group(2).strip()
+        is_enabled = status_icon == "✓"
+        servers.append((name, is_enabled))
+        logger.debug("Parsed MCP server: %s (enabled=%s)", name, is_enabled)
+
+    return servers
+
+
+def _parse_skills_list_lines(lines: list[str]) -> list[tuple[str, bool]]:
+    skills: list[tuple[str, bool]] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if _is_skills_list_noise(line):
+            continue
+
+        match = re.search(
+            r"^([a-zA-Z0-9_\-]+)\s+\[(Enabled|Disabled)\]", line, re.IGNORECASE
+        )
+        if not match:
+            continue
+
+        name = match.group(1).strip()
+        status = match.group(2).strip().lower()
+        is_enabled = status == "enabled"
+        skills.append((name, is_enabled))
+        logger.debug("Parsed skill: %s (enabled=%s)", name, is_enabled)
+
+    return skills
+
+
+def _is_skills_list_noise(line: str) -> bool:
+    return (
+        not line
+        or "Loaded cached" in line
+        or "Loading extension" in line
+        or "Scheduling MCP" in line
+        or "Executing MCP" in line
+        or "MCP context refresh" in line
+        or "Registering notification" in line
+        or ("Server" in line and "supports" in line)
+        or "Discovered Agent Skills:" in line
+        or "Description:" in line
+        or "Location:" in line
+        or line.startswith("Capabilities:")
+    )
+
+
 class BoundedTextBuffer:
     """Хранит последние строки stderr без безлимитного роста памяти."""
 
@@ -173,6 +232,56 @@ def _elapsed_ms(start: float, end: float) -> int:
     return max(0, int((end - start) * 1000))
 
 
+class GeminiStreamReaderLimitExceeded(RuntimeError):
+    """Raised when asyncio readline cannot fit one JSONL stream event."""
+
+
+@dataclass
+class AssistantTextTracker:
+    snapshot: str = ""
+
+    def apply(self, event: StreamEvent) -> str:
+        """Normalize full snapshots into deltas while preserving whitespace."""
+        if event.event_type != "assistant_text":
+            return ""
+
+        original_text = event.assistant_text
+        text = original_text
+        if not event.message_delta:
+            if original_text == self.snapshot:
+                text = ""
+            elif original_text.startswith(self.snapshot):
+                text = original_text[len(self.snapshot) :]
+            self.snapshot = original_text
+        else:
+            self.snapshot += original_text
+
+        event.assistant_text = text
+        return text
+
+
+@dataclass
+class PromptStreamState:
+    started_with_session: bool
+    text_tracker: AssistantTextTracker = field(default_factory=AssistantTextTracker)
+    tool_names_by_id: dict[str, str] = field(default_factory=dict)
+    seen_assistant_text: bool = False
+    seen_result: bool = False
+    emitted_terminal_warning: bool = False
+    approval_requested: bool = False
+    logged_tool_before_text: bool = False
+    captured_session: bool = False
+    init_ms: int | None = None
+    first_text_ms: int | None = None
+    result_status: str = ""
+    result_total_tokens: int = 0
+    result_thoughts_tokens: int = 0
+
+
+StreamCallback = Callable[[StreamEvent], Awaitable[None]]
+ApprovalCallback = Callable[[dict], Awaitable[None]]
+
+
 class SessionManager:
     """Управляет сессиями Gemini CLI."""
 
@@ -217,151 +326,188 @@ class SessionManager:
     def artifact_roots_for_user(self, user_id: int | None = None) -> tuple[str, ...]:
         return self.user_environments.artifact_roots_for(user_id)
 
-    async def get_sessions_list(
-        self, user_id: int | None = None
-    ) -> list[GeminiSessionInfo]:
-        """Вернуть список сессий Gemini CLI, отсортированный от новых к старым."""
-        process = await asyncio.create_subprocess_exec(
-            self._gemini_executable(),
-            "--list-sessions",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.working_dir_for_user(user_id),
-            limit=self.config.gemini_stream_reader_limit_bytes,
+    def _subprocess_kwargs(
+        self,
+        cwd: str,
+        *,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        process_group: bool = True,
+    ) -> dict:
+        kwargs = {
+            "stdout": stdout,
+            "stderr": stderr,
+            "cwd": cwd,
+        }
+        if stdout == asyncio.subprocess.PIPE or stderr == asyncio.subprocess.PIPE:
+            kwargs["limit"] = self.config.gemini_stream_reader_limit_bytes
+        if process_group:
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+        return kwargs
+
+    async def _start_process(
+        self,
+        args: list[str],
+        *,
+        cwd: str,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    ) -> asyncio.subprocess.Process:
+        return await asyncio.create_subprocess_exec(
+            *args,
+            **self._subprocess_kwargs(cwd, stdout=stdout, stderr=stderr),
         )
+
+    async def _run_gemini_command(
+        self,
+        *args: str,
+        cwd: str,
+    ) -> tuple[int | None, str]:
+        process = await self._start_process([self._gemini_executable(), *args], cwd=cwd)
         stdout, stderr = await process.communicate()
         output = (
             stdout.decode("utf-8", errors="replace")
             + "\n"
             + stderr.decode("utf-8", errors="replace")
         )
-        if process.returncode != 0:
+        return process.returncode, output
+
+    async def _read_stdout_line(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        timeout: int,
+    ) -> str | None:
+        if not process.stdout:
+            return None
+        try:
+            line_bytes = await asyncio.wait_for(
+                process.stdout.readline(),
+                timeout=timeout,
+            )
+        except (ValueError, asyncio.LimitOverrunError) as exc:
+            if not _is_stream_reader_limit_error(exc):
+                raise
+            raise GeminiStreamReaderLimitExceeded(
+                _build_stream_reader_limit_error(
+                    self.config.gemini_stream_reader_limit_bytes
+                )
+            ) from exc
+
+        if not line_bytes:
+            return None
+        return line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
+
+    async def _read_stderr(
+        self,
+        process: asyncio.subprocess.Process,
+        stderr_buffer: BoundedTextBuffer,
+        log_stream: Callable[[str, object], None] = logger.debug,
+    ) -> None:
+        if not process.stderr:
+            return
+        while True:
+            try:
+                line = await process.stderr.readline()
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                if not _is_stream_reader_limit_error(exc):
+                    raise
+                text = _build_stream_reader_limit_error(
+                    self.config.gemini_stream_reader_limit_bytes
+                )
+                stderr_buffer.append(text)
+                logger.warning("Gemini stderr stream reader limit exceeded: %s", exc)
+                break
+            if not line:
+                break
+            text = strip_ansi_codes(line.decode("utf-8", errors="replace"))
+            stderr_buffer.append(text)
+            log_stream("[GEMINI STDERR] %s", text.rstrip())
+
+    async def _finish_stderr_task(self, stderr_task: asyncio.Task | None) -> None:
+        if not stderr_task or stderr_task.done():
+            return
+        try:
+            await asyncio.wait_for(stderr_task, timeout=1)
+        except asyncio.TimeoutError:
+            stderr_task.cancel()
+        except asyncio.CancelledError:
+            pass
+
+    async def _ensure_process_finished(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=0.1)
+            except asyncio.TimeoutError:
+                await self._terminate_process(process)
+            return
+        await process.wait()
+
+    async def get_sessions_list(
+        self, user_id: int | None = None
+    ) -> list[GeminiSessionInfo]:
+        """Вернуть список сессий Gemini CLI, отсортированный от новых к старым."""
+        returncode, output = await self._run_gemini_command(
+            "--list-sessions",
+            cwd=self.working_dir_for_user(user_id),
+        )
+        if returncode != 0:
             raise RuntimeError(
                 "gemini --list-sessions failed with code "
-                f"{process.returncode}: {strip_ansi_codes(output).strip()[:1000]}"
+                f"{returncode}: {strip_ansi_codes(output).strip()[:1000]}"
             )
         return parse_gemini_sessions_output(output)
 
+    async def _run_global_list_command(self, group: str) -> list[str]:
+        returncode, output = await self._run_gemini_command(
+            group,
+            "list",
+            cwd=self.config.gemini_working_dir,
+        )
+        if returncode != 0:
+            logger.debug("gemini %s list returned code %s", group, returncode)
+        output = strip_ansi_codes(output)
+        logger.debug("Raw output from 'gemini %s list':\n%s", group, output)
+        return output.splitlines()
+
     async def get_mcp_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список MCP серверов: (имя, включен_ли)."""
-        process = await asyncio.create_subprocess_exec(
-            self._gemini_executable(),
-            "mcp",
-            "list",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,  # Читаем stderr тоже
-            cwd=self.config.gemini_working_dir,
-            limit=self.config.gemini_stream_reader_limit_bytes,
-        )
-        stdout, stderr = await process.communicate()
-        # Объединяем stdout и stderr, так как вывод может быть в любом из них
-        output = stdout.decode("utf-8") + stderr.decode("utf-8")
-        # Удаляем ANSI escape коды
-        output = strip_ansi_codes(output)
-        lines = output.splitlines()
-
-        logger.debug(f"Raw output from 'gemini mcp list':\n{output}")
-
-        mcp_servers = []
-        for line in lines:
-            line = line.strip()
-            # Пропускаем служебные строки
-            if not line or "Configured MCP servers:" in line or "Loaded cached" in line:
-                continue
-
-            # Формат: "✓ exa: ..." или "✗ context7: ..." или "✓ chrome-devtools (from ...): ..."
-            # Улавливаем статус (✓/✗), имя (до двоеточия, без "(from ...)")
-            match = re.search(
-                r"^([✓✗xX])\s+([a-zA-Z0-9_\-]+)(?:\s+\(from [^)]+\))?:", line
-            )
-            if match:
-                status_icon = match.group(1).strip()
-                name = match.group(2).strip()
-                is_enabled = status_icon == "✓"
-                mcp_servers.append((name, is_enabled))
-                logger.debug(f"Parsed MCP server: {name} (enabled={is_enabled})")
-
+        mcp_servers = _parse_mcp_list_lines(await self._run_global_list_command("mcp"))
         logger.info(f"Found {len(mcp_servers)} MCP servers")
         return mcp_servers
 
     async def get_skills_list(self) -> list[tuple[str, bool]]:
         """Возвращает актуальный список Skills: (имя, включен_ли)."""
-        process = await asyncio.create_subprocess_exec(
-            self._gemini_executable(),
-            "skills",
-            "list",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,  # Читаем stderr тоже
-            cwd=self.config.gemini_working_dir,
-            limit=self.config.gemini_stream_reader_limit_bytes,
+        skills_list = _parse_skills_list_lines(
+            await self._run_global_list_command("skills")
         )
-        stdout, stderr = await process.communicate()
-        # Объединяем stdout и stderr, так как вывод может быть в любом из них
-        output = stdout.decode("utf-8") + stderr.decode("utf-8")
-        # Удаляем ANSI escape коды
-        output = strip_ansi_codes(output)
-        lines = output.splitlines()
-
-        logger.debug(f"Raw output from 'gemini skills list':\n{output}")
-
-        skills_list = []
-        for line in lines:
-            line = line.strip()
-            # Пропускаем служебные строки (логи, заголовки, пустые строки)
-            if (
-                not line
-                or "Loaded cached" in line
-                or "Loading extension" in line
-                or "Scheduling MCP" in line
-                or "Executing MCP" in line
-                or "MCP context refresh" in line
-                or "Registering notification" in line
-                or ("Server" in line and "supports" in line)
-                or "Discovered Agent Skills:" in line
-                or "Description:" in line
-                or "Location:" in line
-                or line.startswith("Capabilities:")
-            ):
-                continue
-
-            # Формат: "a11y-debugging [Enabled]"
-            match = re.search(
-                r"^([a-zA-Z0-9_\-]+)\s+\[(Enabled|Disabled)\]", line, re.IGNORECASE
-            )
-            if match:
-                name = match.group(1).strip()
-                status = match.group(2).strip().lower()
-                is_enabled = status == "enabled"
-                skills_list.append((name, is_enabled))
-                logger.debug(f"Parsed skill: {name} (enabled={is_enabled})")
-
         logger.info(f"Found {len(skills_list)} skills")
         return skills_list
 
     async def toggle_mcp(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
-        process = await asyncio.create_subprocess_exec(
-            self._gemini_executable(),
-            "mcp",
-            cmd,
-            name,
+        process = await self._start_process(
+            [self._gemini_executable(), "mcp", cmd, name],
+            cwd=self.config.gemini_working_dir,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            cwd=self.config.gemini_working_dir,
         )
         await process.wait()
         return process.returncode == 0
 
     async def toggle_skill(self, name: str, enable: bool) -> bool:
         cmd = "enable" if enable else "disable"
-        process = await asyncio.create_subprocess_exec(
-            self._gemini_executable(),
-            "skills",
-            cmd,
-            name,
+        process = await self._start_process(
+            [self._gemini_executable(), "skills", cmd, name],
+            cwd=self.config.gemini_working_dir,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            cwd=self.config.gemini_working_dir,
         )
         await process.wait()
         return process.returncode == 0
@@ -420,22 +566,12 @@ class SessionManager:
     async def _delete_session(
         self, session_ref: str, user_id: int | None = None
     ) -> tuple[bool, str]:
-        process = await asyncio.create_subprocess_exec(
-            self._gemini_executable(),
+        returncode, output = await self._run_gemini_command(
             "--delete-session",
             session_ref,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
             cwd=self.working_dir_for_user(user_id),
-            limit=self.config.gemini_stream_reader_limit_bytes,
         )
-        stdout, stderr = await process.communicate()
-        output = (
-            stdout.decode("utf-8", errors="replace")
-            + "\n"
-            + stderr.decode("utf-8", errors="replace")
-        )
-        if process.returncode != 0:
+        if returncode != 0:
             return False, output
         return True, output
 
@@ -528,12 +664,313 @@ class SessionManager:
         args.extend(self.config.screen_reader_flag)
         return args
 
+    async def _heartbeat_loop(
+        self,
+        on_event: StreamCallback,
+        last_activity: Callable[[], float],
+        *,
+        interval: int = 30,
+    ) -> None:
+        heartbeat_count = 0
+        while True:
+            await asyncio.sleep(interval)
+            idle_time = asyncio.get_event_loop().time() - last_activity()
+            if idle_time < interval:
+                continue
+            heartbeat_count += 1
+            elapsed_total = int(idle_time)
+            await on_event(
+                StreamEvent(
+                    event_type="heartbeat",
+                    status_message=f"Обработка... ({elapsed_total}с)",
+                )
+            )
+            logger.debug("Heartbeat #%s: %ss idle", heartbeat_count, elapsed_total)
+
+    def _log_stream_event(
+        self,
+        event: StreamEvent,
+        log_stream: Callable[..., None],
+    ) -> None:
+        if not event.event_type:
+            return
+        log_stream(
+            "Event: type=%s tool=%s tool_id=%s delta=%s has_text=%s "
+            "is_done=%s is_empty=%s is_invalid=%s",
+            event.event_type,
+            event.tool_name,
+            event.tool_id,
+            event.message_delta,
+            bool(event.assistant_text),
+            event.is_done,
+            event.is_empty_response,
+            bool(event.invalid_stream_reason),
+        )
+
+    async def _emit_timeout_warning(
+        self,
+        process: asyncio.subprocess.Process,
+        elapsed: int,
+        on_event: StreamCallback,
+    ) -> None:
+        logger.warning("Gemini CLI timeout after %ss of inactivity", elapsed)
+        await self._terminate_process(process)
+        if elapsed > 0:
+            message = (
+                f"Таймаут: Gemini не отвечал {elapsed} секунд.\n"
+                "Возможные причины:\n"
+                "• Слишком сложный запрос для модели\n"
+                "• Проблемы с MCP-серверами\n"
+                "• Зависание CLI в non-interactive режиме\n\n"
+                "Попробуйте:\n"
+                "• Упростить запрос\n"
+                "• Использовать /new для сброса контекста\n"
+                "• Повторить попытку позже"
+            )
+        else:
+            message = "Таймаут: Gemini не запустился.\nПроверьте логи сервера."
+        await on_event(StreamEvent(event_type="warning", warning_message=message))
+
+    async def _emit_stream_limit_error(
+        self,
+        process: asyncio.subprocess.Process,
+        on_event: StreamCallback,
+    ) -> None:
+        await self._terminate_process(process)
+        await on_event(
+            StreamEvent(
+                event_type="error",
+                error_message=_build_stream_reader_limit_error(
+                    self.config.gemini_stream_reader_limit_bytes
+                ),
+            )
+        )
+
+    async def _handle_prompt_event(
+        self,
+        event: StreamEvent,
+        state: PromptStreamState,
+        *,
+        user_id: int,
+        prompt_start: float,
+        loop: asyncio.AbstractEventLoop,
+        on_event: StreamCallback,
+    ) -> bool:
+        if event.event_type == "init" and state.init_ms is None:
+            state.init_ms = _elapsed_ms(prompt_start, loop.time())
+
+        state.text_tracker.apply(event)
+        self._track_tool_name(event, state)
+        self._track_first_assistant_text(event, state, prompt_start, loop, user_id)
+        self._track_result_stats(event, state)
+        self._capture_session_id(event, state, user_id)
+
+        if self._should_emit_stream_event(event):
+            await on_event(event)
+
+        if event.event_type == "invalid_stream":
+            logger.warning("Received InvalidStream event, continuing...")
+            return False
+        if event.is_empty_response:
+            await self._emit_empty_response_warning(state, on_event)
+            return True
+        if event.approval_request:
+            await self._emit_headless_approval_warning(event, state, on_event)
+            return True
+        if event.is_done:
+            state.seen_result = True
+            return True
+        return False
+
+    def _track_tool_name(
+        self,
+        event: StreamEvent,
+        state: PromptStreamState,
+    ) -> None:
+        if event.event_type == "tool_use" and event.tool_id and event.tool_name:
+            state.tool_names_by_id[event.tool_id] = event.tool_name
+            return
+        if event.event_type != "tool_result" or not event.tool_id:
+            return
+        if not event.tool_name:
+            event.tool_name = state.tool_names_by_id.get(event.tool_id, "")
+        state.tool_names_by_id.pop(event.tool_id, None)
+
+    def _track_first_assistant_text(
+        self,
+        event: StreamEvent,
+        state: PromptStreamState,
+        prompt_start: float,
+        loop: asyncio.AbstractEventLoop,
+        user_id: int,
+    ) -> None:
+        if event.event_type == "assistant_text" and event.assistant_text:
+            if state.first_text_ms is None:
+                state.first_text_ms = _elapsed_ms(prompt_start, loop.time())
+            state.seen_assistant_text = True
+            return
+        if (
+            not state.seen_assistant_text
+            and not state.logged_tool_before_text
+            and event.event_type in {"tool_use", "tool_result"}
+        ):
+            logger.info(
+                "Gemini stream progress detected before assistant text for user %s.",
+                user_id,
+            )
+            state.logged_tool_before_text = True
+
+    def _track_result_stats(
+        self,
+        event: StreamEvent,
+        state: PromptStreamState,
+    ) -> None:
+        if event.event_type != "result_stats":
+            return
+        state.result_status = event.result_status
+        state.result_total_tokens = event.total_tokens
+        state.result_thoughts_tokens = event.thoughts_tokens
+
+    def _capture_session_id(
+        self,
+        event: StreamEvent,
+        state: PromptStreamState,
+        user_id: int,
+    ) -> None:
+        if not event.session_id or state.started_with_session or state.captured_session:
+            return
+        self.active_sessions[user_id] = event.session_id
+        state.captured_session = True
+        logger.info("Captured session_id: %s for user %s", event.session_id, user_id)
+
+    @staticmethod
+    def _should_emit_stream_event(event: StreamEvent) -> bool:
+        return bool(
+            event.event_type
+            and event.event_type not in {"init", "approval_request"}
+            and (event.event_type != "assistant_text" or event.assistant_text)
+        )
+
+    async def _emit_empty_response_warning(
+        self,
+        state: PromptStreamState,
+        on_event: StreamCallback,
+    ) -> None:
+        logger.warning("Received empty response, notifying user...")
+        state.emitted_terminal_warning = True
+        await on_event(
+            StreamEvent(
+                event_type="warning",
+                warning_message=(
+                    "Модель вернула пустой ответ. Попробуйте переформулировать запрос."
+                ),
+            )
+        )
+
+    async def _emit_headless_approval_warning(
+        self,
+        event: StreamEvent,
+        state: PromptStreamState,
+        on_event: StreamCallback,
+    ) -> None:
+        state.approval_requested = True
+        state.emitted_terminal_warning = True
+        await on_event(
+            StreamEvent(
+                event_type="warning",
+                warning_message=_build_headless_approval_warning(
+                    event.approval_request or {}
+                ),
+            )
+        )
+
+    async def _cancel_task(self, task: asyncio.Task | None) -> None:
+        if not task or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _consume_cancelled_process(self, process: asyncio.subprocess.Process) -> bool:
+        cancelled_by_gateway = id(process) in self._cancelled_processes
+        self._cancelled_processes.discard(id(process))
+        return cancelled_by_gateway
+
+    async def _emit_prompt_terminal_event(
+        self,
+        process: asyncio.subprocess.Process,
+        state: PromptStreamState,
+        stderr_buffer: BoundedTextBuffer,
+        cancelled_by_gateway: bool,
+        on_event: StreamCallback,
+    ) -> None:
+        if (
+            process.returncode
+            and process.returncode != 0
+            and not state.emitted_terminal_warning
+            and not state.approval_requested
+            and not cancelled_by_gateway
+        ):
+            await on_event(
+                StreamEvent(
+                    event_type="error",
+                    error_message=_build_process_error(
+                        process.returncode,
+                        stderr_buffer.text(),
+                    ),
+                )
+            )
+            return
+
+        if (
+            not state.seen_assistant_text
+            and not state.seen_result
+            and not state.emitted_terminal_warning
+            and not state.approval_requested
+            and not cancelled_by_gateway
+        ):
+            await on_event(
+                StreamEvent(
+                    event_type="warning",
+                    warning_message=_build_empty_stream_warning(stderr_buffer.text()),
+                )
+            )
+
+    def _record_prompt_latency(
+        self,
+        *,
+        user_id: int,
+        prompt_started_at: float,
+        process_spawn_ms: int,
+        total_ms: int,
+        process: asyncio.subprocess.Process,
+        state: PromptStreamState,
+    ) -> None:
+        if self.runtime_state is None:
+            return
+        self.runtime_state.record_prompt_latency(
+            PromptLatencySnapshot(
+                user_id=user_id,
+                started_at=prompt_started_at,
+                process_spawn_ms=process_spawn_ms,
+                init_ms=state.init_ms,
+                first_text_ms=state.first_text_ms,
+                total_ms=total_ms,
+                returncode=process.returncode,
+                result_status=state.result_status,
+                total_tokens=state.result_total_tokens,
+                thoughts_tokens=state.result_thoughts_tokens,
+            )
+        )
+
     async def send_prompt(
         self,
         prompt: str,
         user_id: int,
-        on_event: Callable[[StreamEvent], asyncio.Future],
-        on_approval: Callable[[dict], asyncio.Future],
+        on_event: StreamCallback,
+        on_approval: ApprovalCallback,
         model: str | None = None,
     ) -> None:
         """Отправить промпт в одноразовый процесс и стримить ответ."""
@@ -563,10 +1000,11 @@ class SessionManager:
         self,
         prompt: str,
         user_id: int,
-        on_event: Callable[[StreamEvent], asyncio.Future],
-        on_approval: Callable[[dict], asyncio.Future],
+        on_event: StreamCallback,
+        on_approval: ApprovalCallback,
         model: str | None = None,
     ) -> None:
+        _ = on_approval
         effective_model = model or self.config.gemini_model
         args = self._build_prompt_args(prompt, effective_model)
 
@@ -584,25 +1022,11 @@ class SessionManager:
         )
         logger.debug("Prompt length for user %s: %s chars", user_id, len(prompt))
 
-        process_kwargs = {
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.PIPE,
-            "cwd": working_dir,
-            "limit": self.config.gemini_stream_reader_limit_bytes,
-        }
-        if os.name == "nt":
-            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            process_kwargs["start_new_session"] = True
-
         loop = asyncio.get_running_loop()
         prompt_started_at = time.time()
         prompt_start = loop.time()
         try:
-            process = await asyncio.create_subprocess_exec(
-                *args,
-                **process_kwargs,
-            )
+            process = await self._start_process(args, cwd=working_dir)
         except FileNotFoundError as exc:
             await on_event(
                 StreamEvent(
@@ -615,337 +1039,81 @@ class SessionManager:
         self.active_prompt_processes[user_id] = process
 
         timeout = self.config.gemini_cli_timeout
-        heartbeat_interval = 30  # Heartbeat каждые 30 секунд
         last_activity = loop.time()
-        init_ms: int | None = None
-        first_text_ms: int | None = None
-        heartbeat_task = None
-        stderr_task = None
         stderr_buffer = BoundedTextBuffer()
-        tool_names_by_id: dict[str, str] = {}
-        seen_assistant_text = False
-        seen_result = False
-        emitted_terminal_warning = False
-        approval_requested = False
-        logged_tool_before_text = False
-        assistant_snapshot = ""
-        result_status = ""
-        result_total_tokens = 0
-        result_thoughts_tokens = 0
+        state = PromptStreamState(started_with_session=bool(session_id))
         log_stream = logger.info if self.config.gemini_stream_debug else logger.debug
-
-        async def read_stderr() -> None:
-            if not process.stderr:
-                return
-            while True:
-                try:
-                    line = await process.stderr.readline()
-                except (ValueError, asyncio.LimitOverrunError) as exc:
-                    if not _is_stream_reader_limit_error(exc):
-                        raise
-                    text = _build_stream_reader_limit_error(
-                        self.config.gemini_stream_reader_limit_bytes
-                    )
-                    stderr_buffer.append(text)
-                    logger.warning(
-                        "Gemini stderr stream reader limit exceeded: %s", exc
-                    )
-                    break
-                if not line:
-                    break
-                text = strip_ansi_codes(line.decode("utf-8", errors="replace"))
-                stderr_buffer.append(text)
-                log_stream("[GEMINI STDERR] %s", text.rstrip())
-
-        async def send_heartbeat():
-            """Периодически отправляет heartbeat если нет активности."""
-            nonlocal last_activity
-            heartbeat_count = 0
-            while True:
-                await asyncio.sleep(heartbeat_interval)
-                current_time = asyncio.get_event_loop().time()
-                idle_time = current_time - last_activity
-
-                if idle_time >= heartbeat_interval:
-                    heartbeat_count += 1
-                    elapsed_total = int(idle_time)
-                    await on_event(
-                        StreamEvent(
-                            event_type="heartbeat",
-                            status_message=f"Обработка... ({elapsed_total}с)",
-                        )
-                    )
-                    logger.debug(f"Heartbeat #{heartbeat_count}: {elapsed_total}s idle")
+        heartbeat_task: asyncio.Task | None = None
+        stderr_task: asyncio.Task | None = None
 
         try:
-            # Запускаем heartbeat task
-            heartbeat_task = asyncio.create_task(send_heartbeat())
-            stderr_task = asyncio.create_task(read_stderr())
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(on_event, lambda: last_activity)
+            )
+            stderr_task = asyncio.create_task(
+                self._read_stderr(process, stderr_buffer, log_stream)
+            )
 
             while True:
                 try:
-                    line_bytes = await asyncio.wait_for(
-                        process.stdout.readline(),
-                        timeout=timeout,
-                    )
-                    last_activity = (
-                        asyncio.get_event_loop().time()
-                    )  # Обновляем время активности
+                    line_text = await self._read_stdout_line(process, timeout=timeout)
+                    last_activity = loop.time()
                 except asyncio.TimeoutError:
-                    elapsed = int(asyncio.get_event_loop().time() - last_activity)
-                    logger.warning(f"Gemini CLI timeout after {elapsed}s of inactivity")
-                    emitted_terminal_warning = True
-                    await self._terminate_process(process)
-
-                    # Проверяем был ли хоть какой-то output
-                    if elapsed > 0:
-                        await on_event(
-                            StreamEvent(
-                                event_type="warning",
-                                warning_message=(
-                                    f"Таймаут: Gemini не отвечал {elapsed} секунд.\n"
-                                    "Возможные причины:\n"
-                                    "• Слишком сложный запрос для модели\n"
-                                    "• Проблемы с MCP-серверами\n"
-                                    "• Зависание CLI в non-interactive режиме\n\n"
-                                    "Попробуйте:\n"
-                                    "• Упростить запрос\n"
-                                    "• Использовать /new для сброса контекста\n"
-                                    "• Повторить попытку позже"
-                                ),
-                            )
-                        )
-                    else:
-                        await on_event(
-                            StreamEvent(
-                                event_type="warning",
-                                warning_message=(
-                                    "Таймаут: Gemini не запустился.\n"
-                                    "Проверьте логи сервера."
-                                ),
-                            )
-                        )
+                    elapsed = int(loop.time() - last_activity)
+                    state.emitted_terminal_warning = True
+                    await self._emit_timeout_warning(process, elapsed, on_event)
                     break
-                except (ValueError, asyncio.LimitOverrunError) as exc:
-                    if not _is_stream_reader_limit_error(exc):
-                        raise
-                    emitted_terminal_warning = True
-                    await self._terminate_process(process)
-                    await on_event(
-                        StreamEvent(
-                            event_type="error",
-                            error_message=_build_stream_reader_limit_error(
-                                self.config.gemini_stream_reader_limit_bytes
-                            ),
-                        )
-                    )
+                except GeminiStreamReaderLimitExceeded:
+                    state.emitted_terminal_warning = True
+                    await self._emit_stream_limit_error(process, on_event)
                     break
 
-                if not line_bytes:
-                    # EOF — процесс завершился
+                if line_text is None:
                     break
-
-                line_text = line_bytes.decode("utf-8").rstrip("\r\n")
                 if not line_text:
                     continue
 
                 log_stream("[GEMINI RAW] %s", line_text)
 
                 event = GeminiStreamParser.parse_line(line_text)
-
-                # Логируем события для диагностики
-                if event.event_type:
-                    log_stream(
-                        "Event: type=%s tool=%s tool_id=%s delta=%s has_text=%s "
-                        "is_done=%s is_empty=%s is_invalid=%s",
-                        event.event_type,
-                        event.tool_name,
-                        event.tool_id,
-                        event.message_delta,
-                        bool(event.assistant_text),
-                        event.is_done,
-                        event.is_empty_response,
-                        bool(event.invalid_stream_reason),
-                    )
-
-                if event.event_type == "init" and init_ms is None:
-                    init_ms = _elapsed_ms(prompt_start, loop.time())
-
-                if event.event_type == "assistant_text":
-                    original_text = event.assistant_text
-                    if not event.message_delta:
-                        if original_text == assistant_snapshot:
-                            event.assistant_text = ""
-                        elif original_text.startswith(assistant_snapshot):
-                            event.assistant_text = original_text[
-                                len(assistant_snapshot) :
-                            ]
-                        assistant_snapshot = original_text
-                    else:
-                        assistant_snapshot += original_text
-
-                if event.event_type == "tool_use" and event.tool_id and event.tool_name:
-                    tool_names_by_id[event.tool_id] = event.tool_name
-
-                if event.event_type == "tool_result" and event.tool_id:
-                    if not event.tool_name:
-                        event.tool_name = tool_names_by_id.get(event.tool_id, "")
-                    tool_names_by_id.pop(event.tool_id, None)
-
-                if event.event_type == "assistant_text" and event.assistant_text:
-                    if first_text_ms is None:
-                        first_text_ms = _elapsed_ms(prompt_start, loop.time())
-                    seen_assistant_text = True
-
-                if (
-                    not seen_assistant_text
-                    and not logged_tool_before_text
-                    and event.event_type in {"tool_use", "tool_result"}
-                ):
-                    logger.info(
-                        "Gemini stream progress detected before assistant text for user %s.",
-                        user_id,
-                    )
-                    logged_tool_before_text = True
-
-                if event.event_type == "result_stats":
-                    result_status = event.result_status
-                    result_total_tokens = event.total_tokens
-                    result_thoughts_tokens = event.thoughts_tokens
-
-                # Захват session_id из init-события
-                if event.session_id and not session_id:
-                    self.active_sessions[user_id] = event.session_id
-                    logger.info(
-                        f"Captured session_id: {event.session_id} for user {user_id}"
-                    )
-
-                if (
-                    event.event_type
-                    and event.event_type
-                    not in {
-                        "init",
-                        "approval_request",
-                    }
-                    and (event.event_type != "assistant_text" or event.assistant_text)
-                ):
-                    await on_event(event)
-
-                if event.event_type == "invalid_stream":
-                    logger.warning("Received InvalidStream event, continuing...")
-                    continue
-
-                if event.is_empty_response:
-                    logger.warning("Received empty response, notifying user...")
-                    emitted_terminal_warning = True
-                    await on_event(
-                        StreamEvent(
-                            event_type="warning",
-                            warning_message=(
-                                "Модель вернула пустой ответ. "
-                                "Попробуйте переформулировать запрос."
-                            ),
-                        )
-                    )
-                    break
-
-                if event.approval_request:
-                    approval_requested = True
-                    emitted_terminal_warning = True
-                    await on_event(
-                        StreamEvent(
-                            event_type="warning",
-                            warning_message=_build_headless_approval_warning(
-                                event.approval_request
-                            ),
-                        )
-                    )
-                    break
-
-                if event.is_done:
-                    seen_result = True
+                self._log_stream_event(event, log_stream)
+                should_stop = await self._handle_prompt_event(
+                    event,
+                    state,
+                    user_id=user_id,
+                    prompt_start=prompt_start,
+                    loop=loop,
+                    on_event=on_event,
+                )
+                if should_stop:
                     break
 
         finally:
-            # Останавливаем heartbeat task
-            if heartbeat_task and not heartbeat_task.done():
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
+            await self._cancel_task(heartbeat_task)
+            await self._ensure_process_finished(process)
+            await self._finish_stderr_task(stderr_task)
 
-            # Гарантируем что процесс завершён
-            if process.returncode is None:
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    await self._terminate_process(process)
-            else:
-                await process.wait()
-
-            if stderr_task and not stderr_task.done():
-                try:
-                    await asyncio.wait_for(stderr_task, timeout=1)
-                except asyncio.TimeoutError:
-                    stderr_task.cancel()
-                except asyncio.CancelledError:
-                    pass
-
-            cancelled_by_gateway = id(process) in self._cancelled_processes
-            self._cancelled_processes.discard(id(process))
-
-            if (
-                process.returncode
-                and process.returncode != 0
-                and not emitted_terminal_warning
-                and not approval_requested
-                and not cancelled_by_gateway
-            ):
-                await on_event(
-                    StreamEvent(
-                        event_type="error",
-                        error_message=_build_process_error(
-                            process.returncode,
-                            stderr_buffer.text(),
-                        ),
-                    )
-                )
-            elif (
-                not seen_assistant_text
-                and not seen_result
-                and not emitted_terminal_warning
-                and not approval_requested
-                and not cancelled_by_gateway
-            ):
-                await on_event(
-                    StreamEvent(
-                        event_type="warning",
-                        warning_message=_build_empty_stream_warning(
-                            stderr_buffer.text()
-                        ),
-                    )
-                )
+            cancelled_by_gateway = self._consume_cancelled_process(process)
+            await self._emit_prompt_terminal_event(
+                process,
+                state,
+                stderr_buffer,
+                cancelled_by_gateway,
+                on_event,
+            )
 
             if self.active_prompt_processes.get(user_id) is process:
                 self.active_prompt_processes.pop(user_id, None)
 
             total_ms = _elapsed_ms(prompt_start, loop.time())
-            if self.runtime_state is not None:
-                self.runtime_state.record_prompt_latency(
-                    PromptLatencySnapshot(
-                        user_id=user_id,
-                        started_at=prompt_started_at,
-                        process_spawn_ms=process_spawn_ms,
-                        init_ms=init_ms,
-                        first_text_ms=first_text_ms,
-                        total_ms=total_ms,
-                        returncode=process.returncode,
-                        result_status=result_status,
-                        total_tokens=result_total_tokens,
-                        thoughts_tokens=result_thoughts_tokens,
-                    )
-                )
+            self._record_prompt_latency(
+                user_id=user_id,
+                prompt_started_at=prompt_started_at,
+                process_spawn_ms=process_spawn_ms,
+                total_ms=total_ms,
+                process=process,
+                state=state,
+            )
 
             logger.info(
                 "Prompt processing completed for user %s, returncode=%s, "
@@ -953,8 +1121,8 @@ class SessionManager:
                 user_id,
                 process.returncode,
                 process_spawn_ms,
-                init_ms,
-                first_text_ms,
+                state.init_ms,
+                state.first_text_ms,
                 total_ms,
             )
 
@@ -996,16 +1164,6 @@ class SessionManager:
             approval_mode=approval_mode,
         )
         working_dir = self.working_dir_for_user(user_id)
-        process_kwargs = {
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.PIPE,
-            "cwd": working_dir,
-            "limit": self.config.gemini_stream_reader_limit_bytes,
-        }
-        if os.name == "nt":
-            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            process_kwargs["start_new_session"] = True
 
         logger.info(
             "Spawning internal Gemini prompt for user %s with model %s in %s.",
@@ -1013,44 +1171,20 @@ class SessionManager:
             effective_model,
             working_dir,
         )
-        process = await asyncio.create_subprocess_exec(*args, **process_kwargs)
+        process = await self._start_process(args, cwd=working_dir)
         self.active_prompt_processes[user_id] = process
         stderr_buffer = BoundedTextBuffer()
-        assistant_snapshot = ""
+        text_tracker = AssistantTextTracker()
         chunks: list[str] = []
         seen_result = False
         loop = asyncio.get_running_loop()
         last_activity = loop.time()
-
-        async def read_stderr() -> None:
-            if not process.stderr:
-                return
-            while True:
-                try:
-                    line = await process.stderr.readline()
-                except (ValueError, asyncio.LimitOverrunError) as exc:
-                    if not _is_stream_reader_limit_error(exc):
-                        raise
-                    text = _build_stream_reader_limit_error(
-                        self.config.gemini_stream_reader_limit_bytes
-                    )
-                    stderr_buffer.append(text)
-                    logger.warning(
-                        "Gemini stderr stream reader limit exceeded: %s", exc
-                    )
-                    break
-                if not line:
-                    break
-                text = strip_ansi_codes(line.decode("utf-8", errors="replace"))
-                stderr_buffer.append(text)
-                logger.debug("[GEMINI STDERR] %s", text.rstrip())
-
-        stderr_task = asyncio.create_task(read_stderr())
+        stderr_task = asyncio.create_task(self._read_stderr(process, stderr_buffer))
         try:
             while True:
                 try:
-                    line_bytes = await asyncio.wait_for(
-                        process.stdout.readline(),
+                    line_text = await self._read_stdout_line(
+                        process,
                         timeout=self.config.gemini_cli_timeout,
                     )
                     last_activity = loop.time()
@@ -1060,36 +1194,19 @@ class SessionManager:
                     raise RuntimeError(
                         f"Gemini CLI не отвечал {elapsed} секунд во время /init."
                     ) from exc
-                except (ValueError, asyncio.LimitOverrunError) as exc:
-                    if not _is_stream_reader_limit_error(exc):
-                        raise
+                except GeminiStreamReaderLimitExceeded as exc:
                     await self._terminate_process(process)
-                    raise RuntimeError(
-                        _build_stream_reader_limit_error(
-                            self.config.gemini_stream_reader_limit_bytes
-                        )
-                    ) from exc
+                    raise RuntimeError(str(exc)) from exc
 
-                if not line_bytes:
+                if line_text is None:
                     break
-
-                line_text = line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
                 if not line_text:
                     continue
 
                 event = GeminiStreamParser.parse_line(line_text)
-                if event.event_type == "assistant_text":
-                    text = event.assistant_text
-                    if not event.message_delta:
-                        if text == assistant_snapshot:
-                            text = ""
-                        elif text.startswith(assistant_snapshot):
-                            text = text[len(assistant_snapshot) :]
-                        assistant_snapshot = event.assistant_text
-                    else:
-                        assistant_snapshot += text
-                    if text:
-                        chunks.append(text)
+                text = text_tracker.apply(event)
+                if text:
+                    chunks.append(text)
                 if event.is_empty_response:
                     break
                 if event.approval_request:
@@ -1100,28 +1217,13 @@ class SessionManager:
                     seen_result = True
                     break
         finally:
-            if process.returncode is None:
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    await self._terminate_process(process)
-            else:
-                await process.wait()
-
-            if stderr_task and not stderr_task.done():
-                try:
-                    await asyncio.wait_for(stderr_task, timeout=1)
-                except asyncio.TimeoutError:
-                    stderr_task.cancel()
-                except asyncio.CancelledError:
-                    pass
+            await self._ensure_process_finished(process)
+            await self._finish_stderr_task(stderr_task)
 
             if self.active_prompt_processes.get(user_id) is process:
                 self.active_prompt_processes.pop(user_id, None)
 
-        cancelled_by_gateway = id(process) in self._cancelled_processes
-        self._cancelled_processes.discard(id(process))
-        if cancelled_by_gateway:
+        if self._consume_cancelled_process(process):
             raise RuntimeError("Генерация GEMINI.md остановлена.")
 
         if process.returncode and process.returncode != 0:
