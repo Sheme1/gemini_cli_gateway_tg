@@ -1,7 +1,6 @@
 import asyncio
 from pathlib import Path
 import shutil
-from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -11,6 +10,8 @@ from gateway.bot.ui import build_settings_text
 from gateway.config import Config
 from gateway.streaming.editor import StreamEditor
 from gateway.user_settings import UserSettingsStore
+from tests.fake_telegram import FakeTelegramBot as _FakeBot
+from tests.fake_telegram import HtmlRejectingFakeTelegramBot as _HtmlRejectingBot
 
 
 def make_test_dir() -> Path:
@@ -56,66 +57,6 @@ def test_stream_editor_splits_text_without_losing_spaces() -> None:
 
     assert chunk + remainder == text
     assert "структуру ваших" in chunk + remainder
-
-
-class _FakeBot:
-    def __init__(self, failures=None) -> None:
-        self._next_message_id = 1
-        self.failures = list(failures or [])
-        self.sent: list[dict] = []
-        self.edits: list[dict] = []
-
-    async def send_message(self, chat_id: int, text: str, parse_mode=None):
-        message = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-            "message_id": self._next_message_id,
-        }
-        self._next_message_id += 1
-        self.sent.append(message)
-        return SimpleNamespace(message_id=message["message_id"])
-
-    async def edit_message_text(
-        self,
-        chat_id: int,
-        message_id: int,
-        text: str,
-        parse_mode=None,
-    ) -> None:
-        self.edits.append(
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": parse_mode,
-            }
-        )
-        if self.failures:
-            raise self.failures.pop(0)
-
-
-class _HtmlRejectingBot(_FakeBot):
-    async def edit_message_text(
-        self,
-        chat_id: int,
-        message_id: int,
-        text: str,
-        parse_mode=None,
-    ) -> None:
-        self.edits.append(
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": parse_mode,
-            }
-        )
-        if parse_mode == "HTML":
-            raise TelegramBadRequest(
-                method=None,  # type: ignore[arg-type]
-                message="Bad Request: can't parse entities",
-            )
 
 
 @pytest.mark.asyncio

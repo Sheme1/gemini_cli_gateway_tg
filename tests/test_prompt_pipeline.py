@@ -1,6 +1,5 @@
 import asyncio
 import shutil
-from types import SimpleNamespace
 import uuid
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from gateway.config import Config
 from gateway.gemini.parser import StreamEvent
 from gateway.prompt_guard import PendingPromptStore
 from gateway.usage import UsageLedger
+from tests.fake_telegram import ReplyMarkupFakeTelegramBot as _FakeBot
 
 
 def make_test_dir() -> Path:
@@ -19,57 +19,6 @@ def make_test_dir() -> Path:
     path = root / f"prompt-pipeline-{uuid.uuid4().hex}"
     path.mkdir()
     return path
-
-
-class _FakeBot:
-    def __init__(self) -> None:
-        self._next_message_id = 1
-        self.messages: list[dict] = []
-        self.documents: list[dict] = []
-
-    async def send_message(
-        self,
-        chat_id: int,
-        text: str,
-        reply_markup=None,
-        parse_mode=None,
-    ):
-        message = {
-            "chat_id": chat_id,
-            "text": text,
-            "reply_markup": reply_markup,
-            "parse_mode": parse_mode,
-            "message_id": self._next_message_id,
-        }
-        self._next_message_id += 1
-        self.messages.append(message)
-        return SimpleNamespace(message_id=message["message_id"])
-
-    async def edit_message_text(
-        self,
-        chat_id: int,
-        message_id: int,
-        text: str,
-        reply_markup=None,
-        parse_mode=None,
-    ) -> None:
-        self.messages.append(
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "reply_markup": reply_markup,
-                "parse_mode": parse_mode,
-                "edited": True,
-            }
-        )
-
-    async def send_document(self, chat_id: int, document, caption: str | None = None):
-        filename = getattr(document, "filename", None)
-        self.documents.append(
-            {"chat_id": chat_id, "filename": filename, "caption": caption}
-        )
-        return SimpleNamespace(document=filename)
 
 
 class _FakeUserSettings:
