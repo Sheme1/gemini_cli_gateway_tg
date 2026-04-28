@@ -21,132 +21,133 @@ class GeminiErrorHint:
         )
 
 
+@dataclass(frozen=True)
+class _GeminiErrorRule:
+    code: str
+    title: str
+    cause: str
+    fix: str
+    needle_groups: tuple[tuple[str, ...], ...] = ()
+    returncodes: tuple[int, ...] = ()
+
+
+_GEMINI_ERROR_RULES: tuple[_GeminiErrorRule, ...] = (
+    _GeminiErrorRule(
+        code="input_error",
+        title="Gemini CLI отклонил входные параметры.",
+        cause="Запрос или аргументы запуска оказались некорректными для headless-режима.",
+        fix="Проверьте длину запроса, модель, session_id и дополнительные CLI-флаги.",
+        needle_groups=(("input error", "invalid prompt"),),
+        returncodes=(42,),
+    ),
+    _GeminiErrorRule(
+        code="turn_limit",
+        title="Достигнут лимит ходов Gemini CLI.",
+        cause="Текущая сохранённая сессия стала слишком длинной для продолжения.",
+        fix="Запустите /new или выберите более ранний/другой диалог через /sessions.",
+        needle_groups=(("turn limit exceeded",),),
+        returncodes=(53,),
+    ),
+    _GeminiErrorRule(
+        code="missing_binary",
+        title="Gemini CLI не найден.",
+        cause="Шлюз не смог запустить команду Gemini CLI.",
+        fix="Проверьте GEMINI_BIN и PATH. Для systemd лучше указать полный путь к gemini.",
+        needle_groups=(("enoent", "not found", "is not recognized", "no such file"),),
+    ),
+    _GeminiErrorRule(
+        code="untrusted_workspace",
+        title="Gemini CLI не доверяет рабочей папке.",
+        cause="В headless-режиме Gemini CLI не может показать интерактивный trust-dialog.",
+        fix="Включите GEMINI_SKIP_TRUST=true или задайте GEMINI_CLI_TRUST_WORKSPACE=true для пользователя сервиса.",
+        needle_groups=(
+            (
+                "untrusted workspace",
+                "untrusted folder",
+                "fataluntrustedworkspaceerror",
+                "trust workspace",
+                "folder trust",
+            ),
+        ),
+    ),
+    _GeminiErrorRule(
+        code="auth",
+        title="Gemini CLI не авторизован.",
+        cause="Gemini CLI не нашёл рабочую авторизацию для пользователя сервиса.",
+        fix="Запустите gemini под тем же пользователем, что и gateway, и выполните авторизацию.",
+        needle_groups=(
+            (
+                "not authenticated",
+                "login",
+                "oauth",
+                "auth failed",
+                "credential",
+                "keychain",
+                "keytar",
+            ),
+        ),
+    ),
+    _GeminiErrorRule(
+        code="policy_denied",
+        title="Действие заблокировано policy rules.",
+        cause="Gemini CLI получил запрет от Policy Engine.",
+        fix="Проверьте пользовательские или admin policy TOML-файлы и текущий approval mode.",
+        needle_groups=(
+            ("policy",),
+            ("deny", "denied", "blocked", "disallowed"),
+        ),
+    ),
+    _GeminiErrorRule(
+        code="quota",
+        title="Gemini временно отклонил запрос.",
+        cause="Похоже на лимит квоты или rate limit.",
+        fix="Повторите позже, смените модель на более дешёвую или проверьте лимиты аккаунта.",
+        needle_groups=(("quota", "rate limit", "resource exhausted", "429"),),
+    ),
+    _GeminiErrorRule(
+        code="model_capacity",
+        title="Модель Gemini временно недоступна.",
+        cause="Выбранная модель перегружена или требует fallback-маршрутизации.",
+        fix="Попробуйте модельный пресет auto/flash или повторите запрос позже.",
+        needle_groups=(("overloaded", "capacity", "fallback model"),),
+    ),
+    _GeminiErrorRule(
+        code="invalid_model",
+        title="Модель Gemini недоступна.",
+        cause="Выбранная модель не поддерживается текущей авторизацией или версией CLI.",
+        fix="Откройте /model и выберите другой пресет или измените GEMINI_MODEL в .env.",
+        needle_groups=(
+            ("model", "not supported"),
+            ("invalid", "unknown", "not found", "not supported"),
+        ),
+    ),
+    _GeminiErrorRule(
+        code="timeout",
+        title="Gemini CLI завис или слишком долго молчал.",
+        cause="Процесс не прислал новых stream-json событий до таймаута.",
+        fix="Упростите запрос, отключите тяжёлые MCP/skills или увеличьте GEMINI_CLI_TIMEOUT.",
+        needle_groups=(("timeout", "timed out", "did not answer"),),
+    ),
+    _GeminiErrorRule(
+        code="tool_failure",
+        title="Ошибка инструмента Gemini CLI.",
+        cause="Один из MCP-серверов, skills или встроенных инструментов завершился с ошибкой.",
+        fix="Проверьте /mcp, /skills и подробности в /diagnostics.",
+        needle_groups=(
+            ("mcp", "tool"),
+            ("failed", "error", "timeout"),
+        ),
+    ),
+)
+
+
 def classify_gemini_error(text: str, returncode: int | None = None) -> GeminiErrorHint:
     normalized = " ".join(text.split())
     lowered = normalized.lower()
 
-    if returncode == 42 or _contains_any(lowered, "input error", "invalid prompt"):
-        return _hint(
-            "input_error",
-            "Gemini CLI отклонил входные параметры.",
-            "Запрос или аргументы запуска оказались некорректными для headless-режима.",
-            "Проверьте длину запроса, модель, session_id и дополнительные CLI-флаги.",
-            normalized,
-        )
-
-    if returncode == 53 or _contains_any(lowered, "turn limit exceeded"):
-        return _hint(
-            "turn_limit",
-            "Достигнут лимит ходов Gemini CLI.",
-            "Текущая сохранённая сессия стала слишком длинной для продолжения.",
-            "Запустите /new или выберите более ранний/другой диалог через /sessions.",
-            normalized,
-        )
-
-    if _contains_any(
-        lowered, "enoent", "not found", "is not recognized", "no such file"
-    ):
-        return _hint(
-            "missing_binary",
-            "Gemini CLI не найден.",
-            "Шлюз не смог запустить команду Gemini CLI.",
-            "Проверьте GEMINI_BIN и PATH. Для systemd лучше указать полный путь к gemini.",
-            normalized,
-        )
-
-    if _contains_any(
-        lowered,
-        "untrusted workspace",
-        "untrusted folder",
-        "fataluntrustedworkspaceerror",
-        "trust workspace",
-        "folder trust",
-    ):
-        return _hint(
-            "untrusted_workspace",
-            "Gemini CLI не доверяет рабочей папке.",
-            "В headless-режиме Gemini CLI не может показать интерактивный trust-dialog.",
-            "Включите GEMINI_SKIP_TRUST=true или задайте GEMINI_CLI_TRUST_WORKSPACE=true для пользователя сервиса.",
-            normalized,
-        )
-
-    if _contains_any(
-        lowered,
-        "not authenticated",
-        "login",
-        "oauth",
-        "auth failed",
-        "credential",
-        "keychain",
-        "keytar",
-    ):
-        return _hint(
-            "auth",
-            "Gemini CLI не авторизован.",
-            "Gemini CLI не нашёл рабочую авторизацию для пользователя сервиса.",
-            "Запустите gemini под тем же пользователем, что и gateway, и выполните авторизацию.",
-            normalized,
-        )
-
-    if _contains_any(lowered, "policy") and _contains_any(
-        lowered, "deny", "denied", "blocked", "disallowed"
-    ):
-        return _hint(
-            "policy_denied",
-            "Действие заблокировано policy rules.",
-            "Gemini CLI получил запрет от Policy Engine.",
-            "Проверьте пользовательские или admin policy TOML-файлы и текущий approval mode.",
-            normalized,
-        )
-
-    if _contains_any(lowered, "quota", "rate limit", "resource exhausted", "429"):
-        return _hint(
-            "quota",
-            "Gemini временно отклонил запрос.",
-            "Похоже на лимит квоты или rate limit.",
-            "Повторите позже, смените модель на более дешёвую или проверьте лимиты аккаунта.",
-            normalized,
-        )
-
-    if _contains_any(lowered, "overloaded", "capacity", "fallback model"):
-        return _hint(
-            "model_capacity",
-            "Модель Gemini временно недоступна.",
-            "Выбранная модель перегружена или требует fallback-маршрутизации.",
-            "Попробуйте модельный пресет auto/flash или повторите запрос позже.",
-            normalized,
-        )
-
-    if _contains_any(lowered, "model", "not supported") and _contains_any(
-        lowered, "invalid", "unknown", "not found", "not supported"
-    ):
-        return _hint(
-            "invalid_model",
-            "Модель Gemini недоступна.",
-            "Выбранная модель не поддерживается текущей авторизацией или версией CLI.",
-            "Откройте /model и выберите другой пресет или измените GEMINI_MODEL в .env.",
-            normalized,
-        )
-
-    if _contains_any(lowered, "timeout", "timed out", "did not answer"):
-        return _hint(
-            "timeout",
-            "Gemini CLI завис или слишком долго молчал.",
-            "Процесс не прислал новых stream-json событий до таймаута.",
-            "Упростите запрос, отключите тяжёлые MCP/skills или увеличьте GEMINI_CLI_TIMEOUT.",
-            normalized,
-        )
-
-    if _contains_any(lowered, "mcp", "tool") and _contains_any(
-        lowered, "failed", "error", "timeout"
-    ):
-        return _hint(
-            "tool_failure",
-            "Ошибка инструмента Gemini CLI.",
-            "Один из MCP-серверов, skills или встроенных инструментов завершился с ошибкой.",
-            "Проверьте /mcp, /skills и подробности в /diagnostics.",
-            normalized,
-        )
+    for rule in _GEMINI_ERROR_RULES:
+        if _matches_rule(rule, lowered, returncode):
+            return _hint(rule.code, rule.title, rule.cause, rule.fix, normalized)
 
     code = f"exit_{returncode}" if returncode is not None else "unknown"
     return _hint(
@@ -155,6 +156,14 @@ def classify_gemini_error(text: str, returncode: int | None = None) -> GeminiErr
         "Процесс Gemini вернул ненулевой код или неожиданное сообщение.",
         "Проверьте /diagnostics и серверные логи. Часто помогает /new или смена модели.",
         normalized,
+    )
+
+
+def _matches_rule(rule: _GeminiErrorRule, text: str, returncode: int | None) -> bool:
+    if returncode in rule.returncodes:
+        return True
+    return bool(rule.needle_groups) and all(
+        _contains_any(text, *needles) for needles in rule.needle_groups
     )
 
 
