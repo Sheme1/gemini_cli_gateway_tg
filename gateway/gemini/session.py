@@ -22,6 +22,14 @@ _SESSION_LINE_RE = re.compile(
     r"^\s*(?P<index>\d+)\.\s*(?P<title>.*?)\s*"
     r"\((?P<meta>[^()]*)\)\s*\[(?P<session_id>[A-Za-z0-9-]+)\]\s*$"
 )
+_MCP_LIST_LINE_RE = re.compile(
+    r"^(?P<status>[✓✗xX])\s+(?P<name>[a-zA-Z0-9_\-]+)"
+    r"(?:\s+\(from [^)]+\))?:"
+)
+_SKILL_LIST_LINE_RE = re.compile(
+    r"^(?P<name>[a-zA-Z0-9_\-]+)\s+\[(?P<status>Enabled|Disabled)\]",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -98,45 +106,53 @@ def _is_session_list_noise(line: str) -> bool:
 
 
 def _parse_mcp_list_lines(lines: list[str]) -> list[tuple[str, bool]]:
-    servers: list[tuple[str, bool]] = []
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or "Configured MCP servers:" in line or "Loaded cached" in line:
-            continue
-
-        match = re.search(r"^([✓✗xX])\s+([a-zA-Z0-9_\-]+)(?:\s+\(from [^)]+\))?:", line)
-        if not match:
-            continue
-
-        status_icon = match.group(1).strip()
-        name = match.group(2).strip()
-        is_enabled = status_icon == "✓"
-        servers.append((name, is_enabled))
-        logger.debug("Parsed MCP server: %s (enabled=%s)", name, is_enabled)
-
-    return servers
+    return _parse_named_status_lines(
+        lines,
+        pattern=_MCP_LIST_LINE_RE,
+        is_noise=_is_mcp_list_noise,
+        is_enabled=lambda status: status == "✓",
+        log_label="MCP server",
+    )
 
 
 def _parse_skills_list_lines(lines: list[str]) -> list[tuple[str, bool]]:
-    skills: list[tuple[str, bool]] = []
+    return _parse_named_status_lines(
+        lines,
+        pattern=_SKILL_LIST_LINE_RE,
+        is_noise=_is_skills_list_noise,
+        is_enabled=lambda status: status.lower() == "enabled",
+        log_label="skill",
+    )
+
+
+def _parse_named_status_lines(
+    lines: list[str],
+    *,
+    pattern: re.Pattern[str],
+    is_noise: Callable[[str], bool],
+    is_enabled: Callable[[str], bool],
+    log_label: str,
+) -> list[tuple[str, bool]]:
+    items: list[tuple[str, bool]] = []
     for raw_line in lines:
         line = raw_line.strip()
-        if _is_skills_list_noise(line):
+        if is_noise(line):
             continue
 
-        match = re.search(
-            r"^([a-zA-Z0-9_\-]+)\s+\[(Enabled|Disabled)\]", line, re.IGNORECASE
-        )
+        match = pattern.search(line)
         if not match:
             continue
 
-        name = match.group(1).strip()
-        status = match.group(2).strip().lower()
-        is_enabled = status == "enabled"
-        skills.append((name, is_enabled))
-        logger.debug("Parsed skill: %s (enabled=%s)", name, is_enabled)
+        name = match.group("name").strip()
+        enabled = is_enabled(match.group("status").strip())
+        items.append((name, enabled))
+        logger.debug("Parsed %s: %s (enabled=%s)", log_label, name, enabled)
 
-    return skills
+    return items
+
+
+def _is_mcp_list_noise(line: str) -> bool:
+    return not line or "Configured MCP servers:" in line or "Loaded cached" in line
 
 
 def _is_skills_list_noise(line: str) -> bool:

@@ -106,6 +106,74 @@ def test_parse_gemini_sessions_output_ignores_empty_and_warning_output() -> None
 
 
 @pytest.mark.asyncio
+async def test_session_manager_get_mcp_list_parses_cli_output(monkeypatch) -> None:
+    output = "\n".join(
+        [
+            "Configured MCP servers:",
+            "\x1b[32m✓ github:",
+            "✗ context7 (from workspace):",
+            "x local_server:",
+            "X disabled-one (from user):",
+            "Loaded cached MCP context",
+            "not a server line",
+        ]
+    )
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+    )
+    manager = SessionManager(config)
+
+    async def fake_run_gemini_command(*_args, **_kwargs):
+        return 0, output
+
+    monkeypatch.setattr(manager, "_run_gemini_command", fake_run_gemini_command)
+
+    assert await manager.get_mcp_list() == [
+        ("github", True),
+        ("context7", False),
+        ("local_server", False),
+        ("disabled-one", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_get_skills_list_parses_cli_output(monkeypatch) -> None:
+    output = "\n".join(
+        [
+            "Loaded cached skills",
+            "Discovered Agent Skills:",
+            "writer [Enabled]",
+            "reviewer [Disabled]",
+            "auditor [enabled]",
+            "Description: helper skill",
+            "Location: /tmp/skill",
+            "Capabilities: tools",
+            "Loading extension local",
+            "not a skill line",
+        ]
+    )
+    config = Config(
+        telegram_bot_token="token",
+        gemini_working_dir=".",
+        gemini_artifact_roots=(".",),
+    )
+    manager = SessionManager(config)
+
+    async def fake_run_gemini_command(*_args, **_kwargs):
+        return 0, output
+
+    monkeypatch.setattr(manager, "_run_gemini_command", fake_run_gemini_command)
+
+    assert await manager.get_skills_list() == [
+        ("writer", True),
+        ("reviewer", False),
+        ("auditor", True),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_session_manager_maps_tool_result_to_tool_name(monkeypatch) -> None:
     lines = [
         json.dumps(
