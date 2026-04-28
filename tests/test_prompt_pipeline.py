@@ -77,17 +77,15 @@ class _FakeUserSettings:
         return "compact"
 
 
-class _SoftFinalizeSessionManager:
+class _ArtifactSessionManagerBase:
     def __init__(self, artifact_path):
         self.artifact_path = artifact_path
-        self.cancel_event = asyncio.Event()
         self.cancel_calls: list[str] = []
 
     def has_active_prompt(self, _user_id: int) -> bool:
         return False
 
-    async def send_prompt(self, prompt, user_id, on_event, on_approval) -> None:
-        del prompt, user_id, on_approval
+    async def _emit_artifact_write(self, on_event) -> None:
         await on_event(
             StreamEvent(
                 event_type="tool_use",
@@ -96,32 +94,31 @@ class _SoftFinalizeSessionManager:
             )
         )
         self.artifact_path.write_text("docx", encoding="utf-8")
+
+    def _record_cancel(self, user_id: int, reason: str) -> None:
+        self.cancel_calls.append(f"{user_id}:{reason}")
+
+
+class _SoftFinalizeSessionManager(_ArtifactSessionManagerBase):
+    def __init__(self, artifact_path):
+        super().__init__(artifact_path)
+        self.cancel_event = asyncio.Event()
+
+    async def send_prompt(self, prompt, user_id, on_event, on_approval) -> None:
+        del prompt, user_id, on_approval
+        await self._emit_artifact_write(on_event)
         await self.cancel_event.wait()
 
     async def cancel_active_prompt(self, user_id: int, reason: str = "") -> bool:
-        self.cancel_calls.append(f"{user_id}:{reason}")
+        self._record_cancel(user_id, reason)
         self.cancel_event.set()
         return True
 
 
-class _CompletingSessionManager:
-    def __init__(self, artifact_path):
-        self.artifact_path = artifact_path
-        self.cancel_calls: list[str] = []
-
-    def has_active_prompt(self, _user_id: int) -> bool:
-        return False
-
+class _CompletingSessionManager(_ArtifactSessionManagerBase):
     async def send_prompt(self, prompt, user_id, on_event, on_approval) -> None:
         del prompt, user_id, on_approval
-        await on_event(
-            StreamEvent(
-                event_type="tool_use",
-                tool_name="write_file",
-                tool_id="tool-1",
-            )
-        )
-        self.artifact_path.write_text("docx", encoding="utf-8")
+        await self._emit_artifact_write(on_event)
         await asyncio.sleep(0.08)
         await on_event(
             StreamEvent(
@@ -139,7 +136,7 @@ class _CompletingSessionManager:
         )
 
     async def cancel_active_prompt(self, user_id: int, reason: str = "") -> bool:
-        self.cancel_calls.append(f"{user_id}:{reason}")
+        self._record_cancel(user_id, reason)
         return False
 
 
