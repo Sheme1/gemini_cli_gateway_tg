@@ -107,6 +107,49 @@ class _PromptProcess:
         self.returncode = -9
 
 
+def _make_session_state_config(tmp_path: Path) -> Config:
+    return Config(
+        telegram_bot_token="token",
+        gemini_working_dir=str(tmp_path),
+        gemini_artifact_roots=(str(tmp_path),),
+        gateway_state_dir=str(tmp_path / "state"),
+    )
+
+
+def _stub_session_processes(
+    monkeypatch,
+    *,
+    list_output: str,
+    prompt_session_id: str,
+) -> list[tuple[tuple[str, ...], dict]]:
+    calls: list[tuple[tuple[str, ...], dict]] = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        if "--list-sessions" in args:
+            return _ListProcess(list_output)
+        return _PromptProcess(
+            [
+                json.dumps({"type": "init", "session_id": prompt_session_id}),
+                json.dumps({"type": "result", "status": "success"}),
+            ]
+        )
+
+    monkeypatch.setattr(
+        "gateway.gemini.session.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    return calls
+
+
+async def _noop_event(_event):
+    return None
+
+
+async def _noop_approval(_req):
+    return None
+
+
 def test_session_state_store_persists_active_session() -> None:
     tmp_path = make_test_dir()
     try:
@@ -163,44 +206,21 @@ async def test_session_manager_resumes_persisted_session_after_restart(
     monkeypatch,
 ) -> None:
     tmp_path = make_test_dir()
-    calls: list[tuple[tuple[str, ...], dict]] = []
     session_id = "11111111-1111-4111-8111-111111111111"
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        calls.append((args, kwargs))
-        if "--list-sessions" in args:
-            return _ListProcess(f"1. Saved (Just now) [{session_id}]\n")
-        return _PromptProcess(
-            [
-                json.dumps({"type": "init", "session_id": session_id}),
-                json.dumps({"type": "result", "status": "success"}),
-            ]
-        )
-
-    monkeypatch.setattr(
-        "gateway.gemini.session.asyncio.create_subprocess_exec",
-        fake_create_subprocess_exec,
+    calls = _stub_session_processes(
+        monkeypatch,
+        list_output=f"1. Saved (Just now) [{session_id}]\n",
+        prompt_session_id=session_id,
     )
 
     try:
-        config = Config(
-            telegram_bot_token="token",
-            gemini_working_dir=str(tmp_path),
-            gemini_artifact_roots=(str(tmp_path),),
-            gateway_state_dir=str(tmp_path / "state"),
-        )
+        config = _make_session_state_config(tmp_path)
         first_manager = SessionManager(config)
         await first_manager.set_active_session(42, session_id)
 
         restarted_manager = SessionManager(config)
 
-        async def on_event(_event):
-            return None
-
-        async def on_approval(_req):
-            return None
-
-        await restarted_manager.send_prompt("hello", 42, on_event, on_approval)
+        await restarted_manager.send_prompt("hello", 42, _noop_event, _noop_approval)
 
         prompt_args = calls[-1][0]
         assert prompt_args[-2:] == ("--resume", session_id)
@@ -215,43 +235,20 @@ async def test_session_manager_new_reset_disables_latest_fallback(
     monkeypatch,
 ) -> None:
     tmp_path = make_test_dir()
-    calls: list[tuple[tuple[str, ...], dict]] = []
     old_session_id = "33333333-3333-4333-8333-333333333333"
     new_session_id = "44444444-4444-4444-8444-444444444444"
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        calls.append((args, kwargs))
-        if "--list-sessions" in args:
-            return _ListProcess(f"1. Old (Just now) [{old_session_id}]\n")
-        return _PromptProcess(
-            [
-                json.dumps({"type": "init", "session_id": new_session_id}),
-                json.dumps({"type": "result", "status": "success"}),
-            ]
-        )
-
-    monkeypatch.setattr(
-        "gateway.gemini.session.asyncio.create_subprocess_exec",
-        fake_create_subprocess_exec,
+    calls = _stub_session_processes(
+        monkeypatch,
+        list_output=f"1. Old (Just now) [{old_session_id}]\n",
+        prompt_session_id=new_session_id,
     )
 
     try:
-        config = Config(
-            telegram_bot_token="token",
-            gemini_working_dir=str(tmp_path),
-            gemini_artifact_roots=(str(tmp_path),),
-            gateway_state_dir=str(tmp_path / "state"),
-        )
+        config = _make_session_state_config(tmp_path)
         manager = SessionManager(config)
         await manager.reset(42, reason="/new")
 
-        async def on_event(_event):
-            return None
-
-        async def on_approval(_req):
-            return None
-
-        await manager.send_prompt("hello", 42, on_event, on_approval)
+        await manager.send_prompt("hello", 42, _noop_event, _noop_approval)
 
         prompt_args = calls[-1][0]
         assert "--resume" not in prompt_args
@@ -265,41 +262,18 @@ async def test_session_manager_auto_resumes_latest_when_state_is_empty(
     monkeypatch,
 ) -> None:
     tmp_path = make_test_dir()
-    calls: list[tuple[tuple[str, ...], dict]] = []
     session_id = "22222222-2222-4222-8222-222222222222"
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        calls.append((args, kwargs))
-        if "--list-sessions" in args:
-            return _ListProcess(f"1. Existing (Just now) [{session_id}]\n")
-        return _PromptProcess(
-            [
-                json.dumps({"type": "init", "session_id": session_id}),
-                json.dumps({"type": "result", "status": "success"}),
-            ]
-        )
-
-    monkeypatch.setattr(
-        "gateway.gemini.session.asyncio.create_subprocess_exec",
-        fake_create_subprocess_exec,
+    calls = _stub_session_processes(
+        monkeypatch,
+        list_output=f"1. Existing (Just now) [{session_id}]\n",
+        prompt_session_id=session_id,
     )
 
     try:
-        config = Config(
-            telegram_bot_token="token",
-            gemini_working_dir=str(tmp_path),
-            gemini_artifact_roots=(str(tmp_path),),
-            gateway_state_dir=str(tmp_path / "state"),
-        )
+        config = _make_session_state_config(tmp_path)
         manager = SessionManager(config)
 
-        async def on_event(_event):
-            return None
-
-        async def on_approval(_req):
-            return None
-
-        await manager.send_prompt("hello", 42, on_event, on_approval)
+        await manager.send_prompt("hello", 42, _noop_event, _noop_approval)
 
         prompt_args = calls[-1][0]
         assert prompt_args[-2:] == ("--resume", "latest")
