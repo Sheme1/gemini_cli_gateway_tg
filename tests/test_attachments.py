@@ -36,7 +36,9 @@ def make_test_dir() -> Path:
 
 
 class _AttachmentBot:
-    def __init__(self, payloads: dict[str, bytes], file_sizes: dict[str, int] | None = None):
+    def __init__(
+        self, payloads: dict[str, bytes], file_sizes: dict[str, int] | None = None
+    ):
         self.payloads = payloads
         self.file_sizes = file_sizes or {}
         self.messages: list[dict] = []
@@ -53,7 +55,9 @@ class _AttachmentBot:
         del timeout
         Path(destination).write_bytes(self.payloads[file_path])
 
-    async def send_message(self, chat_id: int, text: str, parse_mode=None, reply_markup=None):
+    async def send_message(
+        self, chat_id: int, text: str, parse_mode=None, reply_markup=None
+    ):
         message = {
             "chat_id": chat_id,
             "text": text,
@@ -176,8 +180,13 @@ def _docx_payload(text: str) -> bytes:
 
 def test_sanitize_filename_blocks_path_traversal_and_reserved_names() -> None:
     assert sanitize_filename("..\\../bad:name?.pdf", fallback="file") == "bad_name_.pdf"
-    assert sanitize_filename("CON", fallback="file", default_extension=".txt") == "_CON.txt"
-    assert sanitize_filename("", fallback="photo", default_extension=".jpg") == "photo.jpg"
+    assert (
+        sanitize_filename("CON", fallback="file", default_extension=".txt")
+        == "_CON.txt"
+    )
+    assert (
+        sanitize_filename("", fallback="photo", default_extension=".jpg") == "photo.jpg"
+    )
 
 
 def test_docx_text_sidecar_extraction() -> None:
@@ -187,7 +196,10 @@ def test_docx_text_sidecar_extraction() -> None:
         path.write_bytes(_docx_payload("Hello DOCX"))
 
         assert extract_docx_text(path) == "Hello DOCX"
-        sidecar = create_sidecar(path, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        sidecar = create_sidecar(
+            path,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
 
         assert sidecar is not None
         assert "Hello DOCX" in sidecar.read_text(encoding="utf-8")
@@ -256,8 +268,12 @@ def test_attachment_cleanup_removes_old_upload_dirs() -> None:
 
 
 def test_collect_incoming_attachments_chooses_largest_photo() -> None:
-    small = SimpleNamespace(file_id="small", file_unique_id="s", file_size=10, width=10, height=10)
-    large = SimpleNamespace(file_id="large", file_unique_id="l", file_size=20, width=20, height=20)
+    small = SimpleNamespace(
+        file_id="small", file_unique_id="s", file_size=10, width=10, height=10
+    )
+    large = SimpleNamespace(
+        file_id="large", file_unique_id="l", file_size=20, width=20, height=20
+    )
 
     attachments = collect_incoming_attachments([_message(photo=[small, large])])
 
@@ -318,7 +334,9 @@ async def test_process_attachment_document_downloads_and_passes_include_dir() ->
 
 
 @pytest.mark.asyncio
-async def test_process_attachment_photo_with_caption_uses_only_caption_and_native_path() -> None:
+async def test_process_attachment_photo_with_caption_uses_only_caption_and_native_path() -> (
+    None
+):
     tmp_path = make_test_dir()
     try:
         config = _config(tmp_path)
@@ -431,7 +449,9 @@ async def test_process_attachment_unknown_binary_still_reaches_gemini() -> None:
 
         assert session_manager.prompts[0].startswith("@{")
         assert session_manager.prompts[0].endswith("/archive.bin}")
-        assert "Если бинарный формат не поддерживается" not in session_manager.prompts[0]
+        assert (
+            "Если бинарный формат не поддерживается" not in session_manager.prompts[0]
+        )
         assert "extracted_text_path=" not in session_manager.prompts[0]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

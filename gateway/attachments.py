@@ -249,8 +249,7 @@ def caption_prompt(messages: Iterable[Any]) -> str:
     captions = [
         str(caption).strip()
         for message in messages
-        if (caption := getattr(message, "caption", None))
-        and str(caption).strip()
+        if (caption := getattr(message, "caption", None)) and str(caption).strip()
     ]
     if captions:
         return "\n\n".join(captions)
@@ -286,8 +285,7 @@ def sanitize_filename(
         raw_name = fallback
 
     sanitized = "".join(
-        "_" if char in '<>:"/\\|?*{}' or ord(char) < 32 else char
-        for char in raw_name
+        "_" if char in '<>:"/\\|?*{}' or ord(char) < 32 else char for char in raw_name
     )
     sanitized = re.sub(r"\s+", " ", sanitized).strip(" .")
     if not sanitized or sanitized in {".", ".."}:

@@ -10,7 +10,14 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramConflictError
 from aiogram.types import BotCommand
 
-from gateway.bot.handlers import attachments, callbacks, commands, errors, messages, voice
+from gateway.bot.handlers import (
+    attachments,
+    callbacks,
+    commands,
+    errors,
+    messages,
+    voice,
+)
 from gateway.bot.middleware.auth import AuthMiddleware
 from gateway.config import Config
 from gateway.doctor import format_doctor_json, format_doctor_text, run_doctor
