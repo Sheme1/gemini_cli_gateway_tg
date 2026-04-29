@@ -65,6 +65,7 @@ class StreamEditor:
         self._loading_task: Optional[asyncio.Task] = None
         self._message_order: list[int] = []
         self._message_texts: dict[int, str] = {}
+        self._delivery_lock = asyncio.Lock()
 
     async def _loading_animation(self, chat_id: int, message_id: int) -> None:
         stages = [
@@ -136,55 +137,64 @@ class StreamEditor:
         if not text_chunk:
             return
 
-        is_first_answer_chunk = not self._has_answer_text
-        if is_first_answer_chunk:
-            self._has_answer_text = True
-            self._clear_initial_state()
-            if self.last_update_task and not self.last_update_task.done():
-                self.last_update_task.cancel()
+        async with self._delivery_lock:
+            is_first_answer_chunk = not self._has_answer_text
+            if is_first_answer_chunk:
+                self._has_answer_text = True
+                self._clear_initial_state()
+                if self.last_update_task and not self.last_update_task.done():
+                    self.last_update_task.cancel()
 
-        self.text_buffer += text_chunk
+            self.text_buffer += text_chunk
 
-        if len(self.last_sent_text) + len(self.text_buffer) >= self.max_length:
-            await self._flush_and_split()
-        elif is_first_answer_chunk:
-            await self._update_buffered()
-        elif (self.last_update_task is None or self.last_update_task.done()) and (
-            not self.last_sent_text or len(self.text_buffer) >= self.min_update_chars
-        ):
-            self.last_update_task = asyncio.create_task(self._throttled_update())
+            if len(self.last_sent_text) + len(self.text_buffer) >= self.max_length:
+                await self._flush_and_split_locked()
+            elif is_first_answer_chunk:
+                await self._update_buffered_locked()
+            elif (self.last_update_task is None or self.last_update_task.done()) and (
+                not self.last_sent_text or len(self.text_buffer) >= self.min_update_chars
+            ):
+                self.last_update_task = asyncio.create_task(self._throttled_update())
 
     async def set_status(self, status: str) -> None:
-        self._clear_initial_state()
+        async with self._delivery_lock:
+            self._clear_initial_state()
 
-        self.status_line = status
-        if self.last_update_task is None or self.last_update_task.done():
-            self.last_update_task = asyncio.create_task(self._throttled_update())
+            self.status_line = status
+            if self.last_update_task is None or self.last_update_task.done():
+                self.last_update_task = asyncio.create_task(self._throttled_update())
 
     async def _flush_and_split(self) -> None:
+        async with self._delivery_lock:
+            await self._flush_and_split_locked()
+
+    async def _flush_and_split_locked(self) -> None:
         while self.text_buffer:
             available_space = self.max_length - len(self.last_sent_text)
             if available_space <= 0:
-                await self._start_new_message()
+                await self._start_new_message_locked()
                 continue
 
-            chunk, remainder = self._split_text(self.text_buffer, available_space)
+            chunk, _remainder = self._split_text(self.text_buffer, available_space)
             if not chunk:
-                await self._start_new_message()
+                await self._start_new_message_locked()
                 continue
 
             updated_text = self.last_sent_text + chunk
-            success = await self._raw_edit(updated_text)
+            success = await self._raw_edit(updated_text, update_segment=False)
             if not success:
                 break
 
-            self.last_sent_text = updated_text
-            self.text_buffer = remainder
+            self._commit_sent_prefix(chunk, updated_text)
 
             if self.text_buffer:
-                await self._start_new_message()
+                await self._start_new_message_locked()
 
     async def _start_new_message(self) -> None:
+        async with self._delivery_lock:
+            await self._start_new_message_locked()
+
+    async def _start_new_message_locked(self) -> None:
         msg = await self.bot.send_message(
             chat_id=self.chat_id,
             text="…",
@@ -197,21 +207,29 @@ class StreamEditor:
 
     async def _throttled_update(self) -> None:
         await asyncio.sleep(self.interval)
-        await self._update_buffered()
+        async with self._delivery_lock:
+            await self._update_buffered_locked()
 
     async def _update_buffered(self) -> None:
+        async with self._delivery_lock:
+            await self._update_buffered_locked()
+
+    async def _update_buffered_locked(self) -> None:
         if (not self.text_buffer and not self.status_line) or self.is_flushing:
             return
 
         full_text = self.last_sent_text + self.text_buffer
         if len(full_text) > self.max_length:
-            await self._flush_and_split()
+            await self._flush_and_split_locked()
             return
 
-        success = await self._raw_edit(self._with_status(full_text))
+        sent_prefix = self.text_buffer
+        success = await self._raw_edit(
+            self._with_status(full_text),
+            update_segment=False,
+        )
         if success:
-            self.last_sent_text = full_text
-            self.text_buffer = ""
+            self._commit_sent_prefix(sent_prefix, full_text)
 
     def _clear_initial_state(self) -> None:
         if not self._first_chunk:
@@ -287,33 +305,50 @@ class StreamEditor:
         return True
 
     async def flush(self) -> None:
-        self.is_flushing = True
-
         if self._loading_task and not self._loading_task.done():
             self._loading_task.cancel()
 
-        if self.last_update_task and not self.last_update_task.done():
-            self.last_update_task.cancel()
+        await self._cancel_task(self.last_update_task)
 
-        while self.text_buffer:
-            full_text = self.last_sent_text + self.text_buffer
-            if len(full_text) > self.max_length:
-                await self._flush_and_split()
-            else:
-                success = await self._raw_edit(self._with_status(full_text))
-                if not success:
-                    break
-                self.last_sent_text = full_text
-                self.text_buffer = ""
+        async with self._delivery_lock:
+            self.is_flushing = True
+            try:
+                while self.text_buffer:
+                    full_text = self.last_sent_text + self.text_buffer
+                    if len(full_text) > self.max_length:
+                        await self._flush_and_split_locked()
+                    else:
+                        sent_prefix = self.text_buffer
+                        success = await self._raw_edit(
+                            self._with_status(full_text),
+                            update_segment=False,
+                        )
+                        if not success:
+                            break
+                        self._commit_sent_prefix(sent_prefix, full_text)
 
-        final_text = self._with_status(self.last_sent_text)
-        if final_text != self._last_display_text:
-            await self._raw_edit(final_text)
+                final_text = self._with_status(self.last_sent_text)
+                if final_text != self._last_display_text:
+                    await self._raw_edit(final_text, update_segment=False)
+                    if self.current_message_id:
+                        self._set_message_text(
+                            self.current_message_id,
+                            self.last_sent_text or "…",
+                        )
 
-        if self._has_answer_text:
-            await self._finalize_html_formatting()
+                if self._has_answer_text:
+                    await self._finalize_html_formatting()
+            finally:
+                self.is_flushing = False
 
-        self.is_flushing = False
+    async def _cancel_task(self, task: asyncio.Task | None) -> None:
+        if not task or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     def _split_text(self, text: str, limit: int) -> tuple[str, str]:
         if len(text) <= limit:
@@ -371,6 +406,18 @@ class StreamEditor:
 
     def _set_message_text(self, message_id: int, text: str) -> None:
         self._remember_message(message_id, text)
+
+    def _commit_sent_prefix(self, sent_prefix: str, sent_text: str) -> None:
+        self.last_sent_text = sent_text
+        if sent_prefix:
+            if self.text_buffer.startswith(sent_prefix):
+                self.text_buffer = self.text_buffer[len(sent_prefix) :]
+            else:
+                logger.warning(
+                    "Stream buffer prefix mismatch; keeping pending text to avoid loss."
+                )
+        if self.current_message_id:
+            self._set_message_text(self.current_message_id, sent_text or "…")
 
     async def _finalize_html_formatting(self) -> None:
         for message_id in list(self._message_order):

@@ -89,6 +89,90 @@ class _CompletingSessionManager(_ArtifactSessionManagerBase):
         return False
 
 
+class _LongPlainSessionManager:
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+
+    def has_active_prompt(self, _user_id: int) -> bool:
+        return False
+
+    async def send_prompt(self, prompt, user_id, on_event, on_approval) -> None:
+        del prompt, user_id, on_approval
+        for chunk in self.chunks:
+            await on_event(
+                StreamEvent(
+                    event_type="assistant_text",
+                    assistant_text=chunk,
+                )
+            )
+            await asyncio.sleep(0)
+
+
+class _ToolHeavySessionManager:
+    def has_active_prompt(self, _user_id: int) -> bool:
+        return False
+
+    async def send_prompt(self, prompt, user_id, on_event, on_approval) -> None:
+        del prompt, user_id, on_approval
+        await on_event(
+            StreamEvent(
+                event_type="tool_use",
+                tool_name="search",
+                tool_id="tool-1",
+            )
+        )
+        await on_event(
+            StreamEvent(
+                event_type="tool_result",
+                tool_name="search",
+                tool_id="tool-1",
+                tool_status="success",
+                tool_output_preview="found",
+            )
+        )
+        await on_event(
+            StreamEvent(
+                event_type="assistant_text",
+                assistant_text="Финальный ",
+            )
+        )
+        await on_event(
+            StreamEvent(
+                event_type="tool_use",
+                tool_name="write_file",
+                tool_id="tool-2",
+            )
+        )
+        await on_event(
+            StreamEvent(
+                event_type="tool_result",
+                tool_name="write_file",
+                tool_id="tool-2",
+                tool_status="success",
+                tool_output_preview="done",
+            )
+        )
+        await on_event(
+            StreamEvent(
+                event_type="assistant_text",
+                assistant_text="ответ готов.",
+            )
+        )
+
+
+def _latest_message_texts(bot: _FakeBot) -> list[str]:
+    order: list[int] = []
+    texts: dict[int, str] = {}
+    for message in bot.messages:
+        message_id = message.get("message_id")
+        if message_id is None:
+            continue
+        if message_id not in texts:
+            order.append(message_id)
+        texts[message_id] = message["text"]
+    return [texts[message_id] for message_id in order]
+
+
 @pytest.mark.asyncio
 async def test_process_prompt_soft_finalizes_after_artifact_delivery() -> None:
     tmp_path = make_test_dir()
@@ -119,6 +203,71 @@ async def test_process_prompt_soft_finalizes_after_artifact_delivery() -> None:
         assert [doc["filename"] for doc in bot.documents] == ["referat.docx"]
         assert any("не прислал финальный result" in msg["text"] for msg in bot.messages)
         assert session_manager.cancel_calls
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_prompt_preserves_long_plain_stream_across_messages() -> None:
+    tmp_path = make_test_dir()
+    try:
+        bot = _FakeBot()
+        answer = "ДлинныйОтвет" * 120
+        chunks = [answer[index : index + 41] for index in range(0, len(answer), 41)]
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(tmp_path),
+            gemini_artifact_roots=(str(tmp_path),),
+            stream_update_interval=0.01,
+            stream_max_message_length=180,
+            stream_min_update_chars=40,
+            artifact_stable_seconds=0.01,
+        )
+
+        await process_gemini_prompt(
+            bot=bot,
+            chat_id=1,
+            user_id=42,
+            prompt="test",
+            session_manager=_LongPlainSessionManager(chunks),
+            config=config,
+            user_settings=_FakeUserSettings(),
+        )
+
+        assert "".join(_latest_message_texts(bot)) == answer
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_prompt_keeps_tool_progress_out_of_final_compact_answer() -> None:
+    tmp_path = make_test_dir()
+    try:
+        bot = _FakeBot()
+        config = Config(
+            telegram_bot_token="token",
+            gemini_working_dir=str(tmp_path),
+            gemini_artifact_roots=(str(tmp_path),),
+            stream_update_interval=0.01,
+            artifact_stable_seconds=0.01,
+        )
+
+        await process_gemini_prompt(
+            bot=bot,
+            chat_id=1,
+            user_id=42,
+            prompt="test",
+            session_manager=_ToolHeavySessionManager(),
+            config=config,
+            user_settings=_FakeUserSettings(),
+        )
+
+        final_text = _latest_message_texts(bot)[0]
+
+        assert final_text == "Финальный ответ готов."
+        assert "Инструмент" not in final_text
+        assert "Результат" not in final_text
+        assert "Выполняю" not in final_text
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 

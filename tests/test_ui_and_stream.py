@@ -14,6 +14,33 @@ from tests.fake_telegram import FakeTelegramBot as _FakeBot
 from tests.fake_telegram import HtmlRejectingFakeTelegramBot as _HtmlRejectingBot
 
 
+class _SlowEditBot(_FakeBot):
+    def __init__(self, delayed_text: str) -> None:
+        super().__init__()
+        self.delayed_text = delayed_text
+        self.entered_delayed_edit = asyncio.Event()
+        self.release_delayed_edit = asyncio.Event()
+        self._delay_used = False
+
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode=None,
+    ) -> None:
+        await super().edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode=parse_mode,
+        )
+        if text == self.delayed_text and not self._delay_used:
+            self._delay_used = True
+            self.entered_delayed_edit.set()
+            await self.release_delayed_edit.wait()
+
+
 def make_test_dir() -> Path:
     root = Path.cwd() / ".test_runtime"
     root.mkdir(exist_ok=True)
@@ -105,6 +132,55 @@ async def test_stream_editor_coalesces_later_small_chunks() -> None:
     await editor.flush()
 
     assert bot.edits[-1]["text"] == "Первый маленький"
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_keeps_chunk_added_during_slow_edit() -> None:
+    bot = _SlowEditBot(delayed_text="AB")
+    editor = StreamEditor(bot=bot, chat_id=1, interval=0, min_update_chars=1)
+
+    await editor.initialize("loading")
+    await editor.append_text("A")
+    await editor.append_text("B")
+    await asyncio.wait_for(bot.entered_delayed_edit.wait(), timeout=1)
+
+    append_task = asyncio.create_task(editor.append_text("C"))
+    await asyncio.sleep(0)
+    bot.release_delayed_edit.set()
+    await asyncio.wait_for(append_task, timeout=1)
+    await editor.flush()
+
+    assert bot.edits[-1]["text"] == "ABC"
+    assert editor.last_sent_text == "ABC"
+    assert editor.text_buffer == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_editor_keeps_long_answer_text_across_splits() -> None:
+    bot = _FakeBot()
+    editor = StreamEditor(
+        bot=bot,
+        chat_id=1,
+        interval=0,
+        max_length=80,
+        min_update_chars=10,
+    )
+    text = "ДлинныйОтвет" * 80
+
+    await editor.initialize("loading")
+    for index in range(0, len(text), 37):
+        await editor.append_text(text[index : index + 37])
+    await editor.flush()
+
+    stored_text = "".join(
+        editor._message_texts[message_id] for message_id in editor._message_order
+    )
+
+    assert stored_text == text
+    assert all(
+        len(editor._message_texts[message_id]) <= 80
+        for message_id in editor._message_order
+    )
 
 
 @pytest.mark.asyncio
