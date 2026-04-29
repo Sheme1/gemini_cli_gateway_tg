@@ -283,6 +283,7 @@ class PromptStreamState:
     started_with_session: bool
     resume_ref: str | None = None
     resume_source: str = "new"
+    persist_session: bool = True
     text_tracker: AssistantTextTracker = field(default_factory=AssistantTextTracker)
     tool_names_by_id: dict[str, str] = field(default_factory=dict)
     seen_assistant_text: bool = False
@@ -1095,6 +1096,15 @@ class SessionManager:
     ) -> None:
         if not event.session_id or state.captured_session:
             return
+        if not state.persist_session:
+            state.captured_session = True
+            logger.info(
+                "Ignoring transient session_id: %s for user %s resume_source=%s",
+                event.session_id,
+                user_id,
+                state.resume_source,
+            )
+            return
         source = state.resume_source or "new"
         self._set_active_session(user_id, event.session_id, source=source)
         state.captured_session = True
@@ -1235,6 +1245,8 @@ class SessionManager:
         on_approval: ApprovalCallback,
         model: str | None = None,
         include_directories: tuple[str, ...] = (),
+        resume_session: bool = True,
+        persist_session: bool = True,
     ) -> None:
         """Отправить промпт в одноразовый процесс и стримить ответ."""
         lock = self._prompt_locks.setdefault(user_id, asyncio.Lock())
@@ -1258,6 +1270,8 @@ class SessionManager:
                 on_approval,
                 model=model,
                 include_directories=include_directories,
+                resume_session=resume_session,
+                persist_session=persist_session,
             )
 
     async def _send_prompt_locked(
@@ -1268,6 +1282,8 @@ class SessionManager:
         on_approval: ApprovalCallback,
         model: str | None = None,
         include_directories: tuple[str, ...] = (),
+        resume_session: bool = True,
+        persist_session: bool = True,
     ) -> None:
         _ = on_approval
         effective_model = model or self.config.gemini_model
@@ -1277,7 +1293,17 @@ class SessionManager:
             include_directories=include_directories,
         )
 
-        resume_decision = await self._resolve_resume_decision(user_id)
+        working_dir = self.working_dir_for_user(user_id)
+        if resume_session:
+            resume_decision = await self._resolve_resume_decision(user_id)
+        else:
+            resume_decision = ResumeDecision(None, "new")
+            if not persist_session and not self.get_active_session(user_id):
+                self.session_state.mark_cleared(
+                    user_id,
+                    workspace=working_dir,
+                    source="transient-attachment",
+                )
         if resume_decision.session_ref:
             args.extend(["--resume", resume_decision.session_ref])
         if resume_decision.warning:
@@ -1288,7 +1314,6 @@ class SessionManager:
                 )
             )
 
-        working_dir = self.working_dir_for_user(user_id)
         logger.info(
             "Spawning Gemini for user %s with model %s in %s resume_source=%s: %s",
             user_id,
@@ -1322,6 +1347,7 @@ class SessionManager:
             started_with_session=bool(resume_decision.session_ref),
             resume_ref=resume_decision.session_ref,
             resume_source=resume_decision.source,
+            persist_session=persist_session,
         )
         log_stream = logger.info if self.config.gemini_stream_debug else logger.debug
         heartbeat_task: asyncio.Task | None = None

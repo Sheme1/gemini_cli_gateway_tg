@@ -96,6 +96,9 @@ class _SessionManager:
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.include_directories: list[tuple[str, ...]] = []
+        self.models: list[str | None] = []
+        self.resume_sessions: list[bool] = []
+        self.persist_sessions: list[bool] = []
 
     def has_active_prompt(self, _user_id: int) -> bool:
         return False
@@ -108,10 +111,15 @@ class _SessionManager:
         on_approval,
         model=None,
         include_directories=(),
+        resume_session=True,
+        persist_session=True,
     ) -> None:
-        del user_id, on_approval, model
+        del user_id, on_approval
         self.prompts.append(prompt)
         self.include_directories.append(tuple(include_directories))
+        self.models.append(model)
+        self.resume_sessions.append(resume_session)
+        self.persist_sessions.append(persist_session)
         await on_event(
             StreamEvent(
                 event_type="assistant_text",
@@ -303,6 +311,51 @@ async def test_process_attachment_document_downloads_and_passes_include_dir() ->
         assert "Quarterly report" not in session_manager.prompts[0]
         assert session_manager.include_directories[0]
         assert Path(session_manager.include_directories[0][0]).is_dir()
+        assert session_manager.models == ["auto"]
+        assert session_manager.resume_sessions == [False]
+        assert session_manager.persist_sessions == [False]
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_attachment_photo_uses_fast_image_prompt_and_model() -> None:
+    tmp_path = make_test_dir()
+    try:
+        config = _config(tmp_path)
+        bot = _AttachmentBot({"photo": b"jpeg"})
+        session_manager = _SessionManager()
+        dependencies = _AlbumDependencies(
+            bot=bot,
+            session_manager=session_manager,  # type: ignore[arg-type]
+            config=config,
+            user_settings=_UserSettings(),  # type: ignore[arg-type]
+            usage_ledger=None,  # type: ignore[arg-type]
+            prompt_guard=PendingPromptStore(),
+        )
+        message = _message(
+            caption="Что изображено?",
+            photo=[
+                SimpleNamespace(
+                    file_id="photo",
+                    file_unique_id="unique",
+                    file_size=4,
+                    width=1000,
+                    height=667,
+                )
+            ],
+        )
+
+        await process_attachment_messages([message], dependencies)
+
+        prompt = session_manager.prompts[0]
+        assert "@{" in prompt
+        assert "Используй только прикрепленные ниже изображения" in prompt
+        assert "без шагов анализа" in prompt
+        assert "read_file по" not in prompt
+        assert session_manager.models == ["flash"]
+        assert session_manager.resume_sessions == [False]
+        assert session_manager.persist_sessions == [False]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 

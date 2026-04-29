@@ -156,6 +156,16 @@ async def process_attachment_messages(
         return
 
     initial_text = "📎 Вложения загружены. Запускаю Gemini..."
+    logger.info(
+        "Attachment bundle prepared for user %s: files=%s include_dirs=%s "
+        "image_only=%s model_override=%s resume_session=%s",
+        user_id,
+        [path.name for path in bundle.saved_file_paths],
+        bundle.include_dirs,
+        bundle.is_image_only,
+        bundle.model_override,
+        dependencies.config.attachment_resume_session,
+    )
     await dependencies.bot.edit_message_text(
         chat_id=chat_id,
         message_id=status_message.message_id,
@@ -174,4 +184,8 @@ async def process_attachment_messages(
         initial_message_id=status_message.message_id,
         initial_text=initial_text,
         extra_include_directories=bundle.include_dirs,
+        model_override=bundle.model_override,
+        resume_session=dependencies.config.attachment_resume_session,
+        persist_session=dependencies.config.attachment_resume_session,
+        suppress_pre_tool_text=bundle.is_image_only,
     )

@@ -144,6 +144,8 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `ATTACHMENT_DOWNLOAD_TIMEOUT` | No | Seconds to wait while downloading one Telegram attachment. |
 | `ATTACHMENT_RETENTION_DAYS` | No | Days to keep downloaded input files under `GATEWAY_STATE_DIR/uploads`. Defaults to `7`. |
 | `ATTACHMENT_ALBUM_DEBOUNCE_SECONDS` | No | Seconds to wait for the remaining Telegram media-group items before sending one combined Gemini prompt. |
+| `ATTACHMENT_RESUME_SESSION` | No | `false` by default. Incoming attachment prompts run isolated from the saved text-chat session to avoid stale visual context. |
+| `ATTACHMENT_IMAGE_MODEL` | No | Model used for image-only attachment prompts. Defaults to `flash`. Empty value uses the normal per-user model. |
 | `USER_DAILY_TOKEN_LIMIT` | No | Per-user daily token limit from Gemini result stats. `0` disables the limit. |
 | `GLOBAL_DAILY_TOKEN_LIMIT` | No | Global daily token limit from Gemini result stats. `0` disables the limit. |
 | `POLLING_TIMEOUT` | No | Telegram long-polling timeout passed to aiogram. |
@@ -295,10 +297,12 @@ That keeps conversations continuous without depending on one forever-running sub
 Incoming Telegram attachments are saved under `GATEWAY_STATE_DIR/uploads`, not
 inside `GEMINI_WORKING_DIR`. The gateway passes the per-request upload directory
 to Gemini CLI through `--include-directories` and adds file paths plus metadata to
-the prompt. Images, PDFs, audio, and video are handled by Gemini CLI's native
-file reading. DOCX and text-like files also get a `.txt` sidecar extracted by the
+the prompt. Image-only prompts use a shorter `@{path}` flow and default to the
+`flash` model. PDFs, audio, and video are handled by Gemini CLI's native file
+reading. DOCX and text-like files also get a `.txt` sidecar extracted by the
 gateway. Other binary files are accepted up to the Telegram Bot API download
-limit, but Gemini may only be able to use their metadata.
+limit, but Gemini may only be able to use their metadata. Attachment prompts are
+not resumed into the saved chat session by default.
 
 When `GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES=true`, the gateway resolves a
 separate filesystem scope for every Telegram `from_user.id`:

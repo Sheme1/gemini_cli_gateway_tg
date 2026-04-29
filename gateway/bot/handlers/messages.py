@@ -161,6 +161,10 @@ async def process_gemini_prompt(
     initial_text: str = "",
     skip_prompt_guard: bool = False,
     extra_include_directories: tuple[str, ...] = (),
+    model_override: str | None = None,
+    resume_session: bool = True,
+    persist_session: bool = True,
+    suppress_pre_tool_text: bool = False,
 ) -> None:
     """Общий pipeline потокового вывода для любых входящих запросов."""
     if usage_ledger is not None:
@@ -193,6 +197,10 @@ async def process_gemini_prompt(
                 prompt=prompt,
                 ttl_seconds=config.prompt_confirm_timeout,
                 extra_include_directories=extra_include_directories,
+                model_override=model_override,
+                resume_session=resume_session,
+                persist_session=persist_session,
+                suppress_pre_tool_text=suppress_pre_tool_text,
             )
             await bot.send_message(
                 chat_id=chat_id,
@@ -227,7 +235,7 @@ async def process_gemini_prompt(
     )
     artifact_manager = ArtifactManager(config, user_id=user_id)
     render_mode = user_settings.get_render_mode(user_id)
-    effective_model = getattr(
+    effective_model = model_override or getattr(
         user_settings,
         "get_effective_model",
         lambda _user_id, fallback_model: fallback_model,
@@ -246,6 +254,12 @@ async def process_gemini_prompt(
     async def on_event(event) -> None:
         nonlocal last_event_at, saw_tool_activity, saw_result
         last_event_at = time.monotonic()
+        if (
+            suppress_pre_tool_text
+            and event.event_type == "assistant_text"
+            and not saw_tool_activity
+        ):
+            return
         if event.event_type in {"tool_use", "tool_result"}:
             saw_tool_activity = True
         if event.event_type == "result_stats":
@@ -349,6 +363,8 @@ async def process_gemini_prompt(
             on_approval=on_approval,
             model=effective_model,
             include_directories=extra_include_directories,
+            resume_session=resume_session,
+            persist_session=persist_session,
         )
         prompt_task = asyncio.create_task(prompt_coro)
         watcher_task = asyncio.create_task(
@@ -399,6 +415,8 @@ def _build_send_prompt_call(
     on_approval,
     model: str,
     include_directories: tuple[str, ...],
+    resume_session: bool,
+    persist_session: bool,
 ):
     kwargs: dict[str, Any] = {}
     try:
@@ -409,6 +427,10 @@ def _build_send_prompt_call(
         kwargs["model"] = model
     if "include_directories" in parameters:
         kwargs["include_directories"] = include_directories
+    if "resume_session" in parameters:
+        kwargs["resume_session"] = resume_session
+    if "persist_session" in parameters:
+        kwargs["persist_session"] = persist_session
     return session_manager.send_prompt(
         prompt=prompt,
         user_id=user_id,

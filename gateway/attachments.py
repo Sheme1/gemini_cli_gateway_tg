@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import mimetypes
 import re
@@ -61,6 +62,19 @@ _TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+_IMAGE_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".heif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".svg",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 _DEFAULT_EXTENSIONS = {
     "animation": ".mp4",
     "audio": ".mp3",
@@ -94,6 +108,7 @@ class PreparedAttachment:
     saved_path: Path
     mime_type: str | None
     file_size: int | None
+    sha256: str
     sidecar_path: Path | None = None
 
 
@@ -103,6 +118,8 @@ class AttachmentBundle:
     include_dirs: tuple[str, ...]
     saved_file_paths: tuple[Path, ...]
     sidecar_paths: tuple[Path, ...]
+    is_image_only: bool = False
+    model_override: str | None = None
 
 
 class AttachmentService:
@@ -143,13 +160,25 @@ class AttachmentService:
             shutil.rmtree(request_dir, ignore_errors=True)
             raise
 
+        is_image_only = _is_image_only(prepared)
+        prompt_text = (
+            build_image_attachment_prompt(user_prompt, prepared)
+            if is_image_only
+            else build_attachment_prompt(user_prompt, prepared)
+        )
+        model_override = (
+            self.config.attachment_image_model if is_image_only else None
+        ) or None
+
         return AttachmentBundle(
-            prompt_text=build_attachment_prompt(user_prompt, prepared),
+            prompt_text=prompt_text,
             include_dirs=(str(request_dir),),
             saved_file_paths=tuple(item.saved_path for item in prepared),
             sidecar_paths=tuple(
                 item.sidecar_path for item in prepared if item.sidecar_path is not None
             ),
+            is_image_only=is_image_only,
+            model_override=model_override,
         )
 
     def cleanup_old_uploads(self) -> None:
@@ -206,14 +235,27 @@ class AttachmentService:
             destination=destination,
             timeout=self.config.attachment_download_timeout,
         )
+        actual_size = destination.stat().st_size
+        file_hash = _sha256_file(destination)
         sidecar_path = create_sidecar(destination, attachment.mime_type)
+
+        logger.info(
+            "Attachment saved: kind=%s path=%s mime=%s size=%s sha256=%s sidecar=%s",
+            attachment.kind,
+            destination.resolve(),
+            attachment.mime_type or "unknown",
+            actual_size,
+            file_hash,
+            bool(sidecar_path),
+        )
 
         return PreparedAttachment(
             kind=attachment.kind,
             original_name=attachment.original_name,
             saved_path=destination.resolve(),
             mime_type=attachment.mime_type,
-            file_size=file_size,
+            file_size=file_size or actual_size,
+            sha256=file_hash,
             sidecar_path=sidecar_path.resolve() if sidecar_path else None,
         )
 
@@ -286,6 +328,34 @@ def build_attachment_prompt(
     return "\n".join(lines)
 
 
+def build_image_attachment_prompt(
+    user_prompt: str,
+    attachments: Iterable[PreparedAttachment],
+) -> str:
+    prompt = user_prompt.strip() or (
+        "Ответь одним коротким предложением: что изображено на фото?"
+    )
+    lines = [
+        "Используй только прикрепленные ниже изображения.",
+        "Не используй прошлый контекст, догадки или объекты, которых нет на изображении.",
+        "Ответь на русском кратко, без шагов анализа и без подробного разъяснения.",
+        "",
+        "Изображения:",
+    ]
+    for index, attachment in enumerate(attachments, start=1):
+        lines.extend(
+            [
+                f"{index}. @{{{_prompt_path(attachment.saved_path)}}}",
+                f"   original_name={attachment.original_name}",
+                f"   mime_type={attachment.mime_type or 'unknown'}",
+                f"   size_bytes={attachment.file_size or 'unknown'}",
+                f"   sha256={attachment.sha256}",
+            ]
+        )
+    lines.extend(["", "Запрос пользователя:", prompt])
+    return "\n".join(lines)
+
+
 def sanitize_filename(
     name: str | None,
     *,
@@ -298,7 +368,7 @@ def sanitize_filename(
         raw_name = fallback
 
     sanitized = "".join(
-        "_" if char in '<>:"/\\|?*' or ord(char) < 32 else char
+        "_" if char in '<>:"/\\|?*{}' or ord(char) < 32 else char
         for char in raw_name
     )
     sanitized = re.sub(r"\s+", " ", sanitized).strip(" .")
@@ -461,6 +531,27 @@ def _is_text_like(path: Path, mime_type: str | None) -> bool:
     if path.suffix.lower() in _TEXT_EXTENSIONS:
         return True
     return bool(mime_type and mime_type.lower().startswith("text/"))
+
+
+def _is_image_attachment(attachment: PreparedAttachment) -> bool:
+    if attachment.kind == "photo":
+        return True
+    if attachment.mime_type and attachment.mime_type.lower().startswith("image/"):
+        return True
+    return attachment.saved_path.suffix.lower() in _IMAGE_EXTENSIONS
+
+
+def _is_image_only(attachments: Iterable[PreparedAttachment]) -> bool:
+    items = list(attachments)
+    return bool(items) and all(_is_image_attachment(item) for item in items)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _prompt_path(path: Path) -> str:

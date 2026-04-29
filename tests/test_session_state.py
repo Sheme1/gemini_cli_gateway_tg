@@ -284,6 +284,43 @@ async def test_session_manager_auto_resumes_latest_when_state_is_empty(
 
 
 @pytest.mark.asyncio
+async def test_session_manager_can_run_transient_prompt_without_resume(
+    monkeypatch,
+) -> None:
+    tmp_path = make_test_dir()
+    old_session_id = "22222222-2222-4222-8222-222222222222"
+    prompt_session_id = "55555555-5555-4555-8555-555555555555"
+    calls = _stub_session_processes(
+        monkeypatch,
+        list_output=f"1. Existing (Just now) [{old_session_id}]\n",
+        prompt_session_id=prompt_session_id,
+    )
+
+    try:
+        config = _make_session_state_config(tmp_path)
+        manager = SessionManager(config)
+
+        await manager.send_prompt(
+            "hello",
+            42,
+            _noop_event,
+            _noop_approval,
+            resume_session=False,
+            persist_session=False,
+        )
+
+        prompt_args = calls[-1][0]
+        assert "--resume" not in prompt_args
+        assert manager.get_active_session(42) is None
+        assert manager.session_state.is_cleared(
+            42,
+            workspace=manager.working_dir_for_user(42),
+        )
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_internal_generate_text_uses_service_working_dir(monkeypatch):
     tmp_path = make_test_dir()
     captured_kwargs = {}

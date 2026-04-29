@@ -144,6 +144,8 @@ python -m gateway.main --doctor-json
 | `ATTACHMENT_DOWNLOAD_TIMEOUT` | Нет | Сколько секунд ждать скачивания одного Telegram-вложения. |
 | `ATTACHMENT_RETENTION_DAYS` | Нет | Сколько дней хранить скачанные входные файлы в `GATEWAY_STATE_DIR/uploads`. По умолчанию `7`. |
 | `ATTACHMENT_ALBUM_DEBOUNCE_SECONDS` | Нет | Сколько секунд ждать остальные элементы Telegram media group перед одним общим запросом в Gemini. |
+| `ATTACHMENT_RESUME_SESSION` | Нет | По умолчанию `false`. Запросы с вложениями выполняются отдельно от сохранённой текстовой сессии, чтобы не тащить старый visual-контекст. |
+| `ATTACHMENT_IMAGE_MODEL` | Нет | Модель для image-only запросов. По умолчанию `flash`. Пустое значение использует обычную per-user модель. |
 | `USER_DAILY_TOKEN_LIMIT` | Нет | Дневной лимит токенов на пользователя по result stats Gemini. `0` отключает лимит. |
 | `GLOBAL_DAILY_TOKEN_LIMIT` | Нет | Общий дневной лимит токенов по result stats Gemini. `0` отключает лимит. |
 | `POLLING_TIMEOUT` | Нет | Timeout long polling, который передаётся в aiogram. |
@@ -296,10 +298,12 @@ docker compose logs -f gateway
 Входящие Telegram-вложения сохраняются в `GATEWAY_STATE_DIR/uploads`, а не внутри
 `GEMINI_WORKING_DIR`. Gateway передаёт папку конкретного запроса в Gemini CLI
 через `--include-directories` и добавляет в prompt пути к файлам с метаданными.
-Изображения, PDF, audio и video читает нативный file-reading Gemini CLI. Для
-DOCX и text-like файлов gateway дополнительно создаёт `.txt` sidecar. Остальные
-бинарные файлы принимаются до лимита скачивания Telegram Bot API, но Gemini
-может использовать только доступные метаданные, если формат не поддерживается.
+Image-only запросы используют более короткий `@{path}` flow и по умолчанию модель
+`flash`. PDF, audio и video читает нативный file-reading Gemini CLI. Для DOCX и
+text-like файлов gateway дополнительно создаёт `.txt` sidecar. Остальные бинарные
+файлы принимаются до лимита скачивания Telegram Bot API, но Gemini может
+использовать только доступные метаданные, если формат не поддерживается. Запросы
+с вложениями по умолчанию не продолжают сохранённую chat-сессию.
 
 Если включить `GATEWAY_EXPERIMENTAL_MULTI_USER_WORKSPACES=true`, gateway создаёт
 отдельную файловую область для каждого Telegram `from_user.id`:

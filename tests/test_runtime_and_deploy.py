@@ -54,6 +54,8 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         monkeypatch.setenv("ATTACHMENT_DOWNLOAD_TIMEOUT", "44")
         monkeypatch.setenv("ATTACHMENT_RETENTION_DAYS", "3")
         monkeypatch.setenv("ATTACHMENT_ALBUM_DEBOUNCE_SECONDS", "0.25")
+        monkeypatch.setenv("ATTACHMENT_RESUME_SESSION", "true")
+        monkeypatch.setenv("ATTACHMENT_IMAGE_MODEL", "flash-lite")
         monkeypatch.setenv("USER_DAILY_TOKEN_LIMIT", "1000")
         monkeypatch.setenv("GLOBAL_DAILY_TOKEN_LIMIT", "2000")
         monkeypatch.setenv("GEMINI_STREAM_READER_LIMIT_BYTES", "123456")
@@ -102,6 +104,8 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.attachment_download_timeout == 44
         assert config.attachment_retention_days == 3
         assert config.attachment_album_debounce_seconds == 0.25
+        assert config.attachment_resume_session is True
+        assert config.attachment_image_model == "flash-lite"
         assert config.user_daily_token_limit == 1000
         assert config.global_daily_token_limit == 2000
         assert config.gemini_stream_reader_limit_bytes == 123456
@@ -118,6 +122,7 @@ def test_config_parses_new_runtime_env(monkeypatch) -> None:
         assert config.redacted_dict()["gateway_session_auto_resume_latest"] is False
         assert config.redacted_dict()["gemini_stream_reader_limit_bytes"] == 123456
         assert config.redacted_dict()["attachment_max_bytes"] == 12345
+        assert config.redacted_dict()["attachment_resume_session"] is True
         assert config.redacted_dict()["telegram_bot_token"] == "1234...oken"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
