@@ -62,19 +62,6 @@ _TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
-_IMAGE_EXTENSIONS = {
-    ".bmp",
-    ".gif",
-    ".heic",
-    ".heif",
-    ".jpeg",
-    ".jpg",
-    ".png",
-    ".svg",
-    ".tif",
-    ".tiff",
-    ".webp",
-}
 _DEFAULT_EXTENSIONS = {
     "animation": ".mp4",
     "audio": ".mp3",
@@ -118,8 +105,6 @@ class AttachmentBundle:
     include_dirs: tuple[str, ...]
     saved_file_paths: tuple[Path, ...]
     sidecar_paths: tuple[Path, ...]
-    is_image_only: bool = False
-    model_override: str | None = None
 
 
 class AttachmentService:
@@ -160,25 +145,13 @@ class AttachmentService:
             shutil.rmtree(request_dir, ignore_errors=True)
             raise
 
-        is_image_only = _is_image_only(prepared)
-        prompt_text = (
-            build_image_attachment_prompt(user_prompt, prepared)
-            if is_image_only
-            else build_attachment_prompt(user_prompt, prepared)
-        )
-        model_override = (
-            self.config.attachment_image_model if is_image_only else None
-        ) or None
-
         return AttachmentBundle(
-            prompt_text=prompt_text,
+            prompt_text=build_attachment_prompt(user_prompt, prepared),
             include_dirs=(str(request_dir),),
             saved_file_paths=tuple(item.saved_path for item in prepared),
             sidecar_paths=tuple(
                 item.sidecar_path for item in prepared if item.sidecar_path is not None
             ),
-            is_image_only=is_image_only,
-            model_override=model_override,
         )
 
     def cleanup_old_uploads(self) -> None:
@@ -281,79 +254,24 @@ def caption_prompt(messages: Iterable[Any]) -> str:
     ]
     if captions:
         return "\n\n".join(captions)
-    return "Проанализируй прикрепленные файлы и ответь по их содержимому."
+    return ""
 
 
 def build_attachment_prompt(
     user_prompt: str,
     attachments: Iterable[PreparedAttachment],
 ) -> str:
-    lines = [
-        "Пользователь прикрепил файлы к сообщению Telegram.",
-        (
-            "Файлы сохранены на сервере и доступны Gemini CLI через read_file, "
-            "потому что их папка передана в --include-directories."
-        ),
-        (
-            "Перед ответом прочитай релевантные вложения через read_file по "
-            "saved_path. Для DOCX и текстовых файлов сначала используй "
-            "extracted_text_path, если он есть; при необходимости сверяйся с "
-            "оригиналом."
-        ),
-        (
-            "Изображения, PDF, audio и video читай из оригинального saved_path. "
-            "Если бинарный формат не поддерживается Gemini CLI, честно скажи об "
-            "этом и работай с доступными метаданными."
-        ),
-        "",
-        "Вложения:",
-    ]
-    for index, attachment in enumerate(attachments, start=1):
-        lines.extend(
-            [
-                f"{index}. type={attachment.kind}",
-                f"   original_name={attachment.original_name}",
-                f"   saved_path={_prompt_path(attachment.saved_path)}",
-                f"   mime_type={attachment.mime_type or 'unknown'}",
-                f"   size_bytes={attachment.file_size or 'unknown'}",
-            ]
-        )
+    attachment_lines: list[str] = []
+    for attachment in attachments:
+        attachment_lines.append(f"@{{{_prompt_path(attachment.saved_path)}}}")
         if attachment.sidecar_path is not None:
-            lines.append(f"   extracted_text_path={_prompt_path(attachment.sidecar_path)}")
+            attachment_lines.append(f"@{{{_prompt_path(attachment.sidecar_path)}}}")
 
-    prompt = user_prompt.strip() or (
-        "Проанализируй прикрепленные файлы и ответь по их содержимому."
-    )
-    lines.extend(["", "Запрос пользователя:", prompt])
-    return "\n".join(lines)
-
-
-def build_image_attachment_prompt(
-    user_prompt: str,
-    attachments: Iterable[PreparedAttachment],
-) -> str:
-    prompt = user_prompt.strip() or (
-        "Ответь одним коротким предложением: что изображено на фото?"
-    )
-    lines = [
-        "Используй только прикрепленные ниже изображения.",
-        "Не используй прошлый контекст, догадки или объекты, которых нет на изображении.",
-        "Ответь на русском кратко, без шагов анализа и без подробного разъяснения.",
-        "",
-        "Изображения:",
-    ]
-    for index, attachment in enumerate(attachments, start=1):
-        lines.extend(
-            [
-                f"{index}. @{{{_prompt_path(attachment.saved_path)}}}",
-                f"   original_name={attachment.original_name}",
-                f"   mime_type={attachment.mime_type or 'unknown'}",
-                f"   size_bytes={attachment.file_size or 'unknown'}",
-                f"   sha256={attachment.sha256}",
-            ]
-        )
-    lines.extend(["", "Запрос пользователя:", prompt])
-    return "\n".join(lines)
+    prompt = user_prompt.strip()
+    attachments_text = "\n".join(attachment_lines)
+    if prompt:
+        return f"{prompt}\n\n{attachments_text}"
+    return attachments_text
 
 
 def sanitize_filename(
@@ -531,19 +449,6 @@ def _is_text_like(path: Path, mime_type: str | None) -> bool:
     if path.suffix.lower() in _TEXT_EXTENSIONS:
         return True
     return bool(mime_type and mime_type.lower().startswith("text/"))
-
-
-def _is_image_attachment(attachment: PreparedAttachment) -> bool:
-    if attachment.kind == "photo":
-        return True
-    if attachment.mime_type and attachment.mime_type.lower().startswith("image/"):
-        return True
-    return attachment.saved_path.suffix.lower() in _IMAGE_EXTENSIONS
-
-
-def _is_image_only(attachments: Iterable[PreparedAttachment]) -> bool:
-    items = list(attachments)
-    return bool(items) and all(_is_image_attachment(item) for item in items)
 
 
 def _sha256_file(path: Path) -> str:

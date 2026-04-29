@@ -383,10 +383,6 @@ async def callback_prompt_confirm(
         initial_text=initial_text,
         skip_prompt_guard=True,
         extra_include_directories=item.extra_include_directories,
-        model_override=item.model_override,
-        resume_session=item.resume_session,
-        persist_session=item.persist_session,
-        suppress_pre_tool_text=item.suppress_pre_tool_text,
     )
 
 

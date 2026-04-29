@@ -97,8 +97,6 @@ class _SessionManager:
         self.prompts: list[str] = []
         self.include_directories: list[tuple[str, ...]] = []
         self.models: list[str | None] = []
-        self.resume_sessions: list[bool] = []
-        self.persist_sessions: list[bool] = []
 
     def has_active_prompt(self, _user_id: int) -> bool:
         return False
@@ -111,15 +109,11 @@ class _SessionManager:
         on_approval,
         model=None,
         include_directories=(),
-        resume_session=True,
-        persist_session=True,
     ) -> None:
         del user_id, on_approval
         self.prompts.append(prompt)
         self.include_directories.append(tuple(include_directories))
         self.models.append(model)
-        self.resume_sessions.append(resume_session)
-        self.persist_sessions.append(persist_session)
         await on_event(
             StreamEvent(
                 event_type="assistant_text",
@@ -305,21 +299,26 @@ async def test_process_attachment_document_downloads_and_passes_include_dir() ->
         await process_attachment_messages([message], dependencies)
 
         assert session_manager.prompts
-        assert "Summarize this file" in session_manager.prompts[0]
-        assert "report.docx" in session_manager.prompts[0]
-        assert "extracted_text_path=" in session_manager.prompts[0]
+        lines = session_manager.prompts[0].splitlines()
+        assert lines[0] == "Summarize this file"
+        assert lines[1] == ""
+        assert len(lines) == 4
+        assert lines[2].startswith("@{")
+        assert lines[2].endswith("/report.docx}")
+        assert lines[3].startswith("@{")
+        assert lines[3].endswith("/report.docx.txt}")
+        assert "saved_path=" not in session_manager.prompts[0]
+        assert "extracted_text_path=" not in session_manager.prompts[0]
         assert "Quarterly report" not in session_manager.prompts[0]
         assert session_manager.include_directories[0]
         assert Path(session_manager.include_directories[0][0]).is_dir()
         assert session_manager.models == ["auto"]
-        assert session_manager.resume_sessions == [False]
-        assert session_manager.persist_sessions == [False]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 @pytest.mark.asyncio
-async def test_process_attachment_photo_uses_fast_image_prompt_and_model() -> None:
+async def test_process_attachment_photo_with_caption_uses_only_caption_and_native_path() -> None:
     tmp_path = make_test_dir()
     try:
         config = _config(tmp_path)
@@ -349,13 +348,57 @@ async def test_process_attachment_photo_uses_fast_image_prompt_and_model() -> No
         await process_attachment_messages([message], dependencies)
 
         prompt = session_manager.prompts[0]
-        assert "@{" in prompt
-        assert "Используй только прикрепленные ниже изображения" in prompt
-        assert "без шагов анализа" in prompt
+        lines = prompt.splitlines()
+        assert lines[0] == "Что изображено?"
+        assert lines[1] == ""
+        assert len(lines) == 3
+        assert lines[2].startswith("@{")
+        assert lines[2].endswith("/photo-unique.jpg}")
+        assert "Используй только прикрепленные ниже изображения" not in prompt
+        assert "без шагов анализа" not in prompt
         assert "read_file по" not in prompt
-        assert session_manager.models == ["flash"]
-        assert session_manager.resume_sessions == [False]
-        assert session_manager.persist_sessions == [False]
+        assert "sha256=" not in prompt
+        assert "mime_type=" not in prompt
+        assert session_manager.models == ["auto"]
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_attachment_photo_without_caption_uses_only_native_path() -> None:
+    tmp_path = make_test_dir()
+    try:
+        config = _config(tmp_path)
+        bot = _AttachmentBot({"photo": b"jpeg"})
+        session_manager = _SessionManager()
+        dependencies = _AlbumDependencies(
+            bot=bot,
+            session_manager=session_manager,  # type: ignore[arg-type]
+            config=config,
+            user_settings=_UserSettings(),  # type: ignore[arg-type]
+            usage_ledger=None,  # type: ignore[arg-type]
+            prompt_guard=PendingPromptStore(),
+        )
+        message = _message(
+            photo=[
+                SimpleNamespace(
+                    file_id="photo",
+                    file_unique_id="unique",
+                    file_size=4,
+                    width=1000,
+                    height=667,
+                )
+            ],
+        )
+
+        await process_attachment_messages([message], dependencies)
+
+        prompt = session_manager.prompts[0]
+        assert prompt.startswith("@{")
+        assert prompt.endswith("/photo-unique.jpg}")
+        assert "\n" not in prompt
+        assert "Проанализируй" not in prompt
+        assert session_manager.models == ["auto"]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
@@ -386,8 +429,9 @@ async def test_process_attachment_unknown_binary_still_reaches_gemini() -> None:
 
         await process_attachment_messages([message], dependencies)
 
-        assert "archive.bin" in session_manager.prompts[0]
-        assert "Если бинарный формат не поддерживается" in session_manager.prompts[0]
+        assert session_manager.prompts[0].startswith("@{")
+        assert session_manager.prompts[0].endswith("/archive.bin}")
+        assert "Если бинарный формат не поддерживается" not in session_manager.prompts[0]
         assert "extracted_text_path=" not in session_manager.prompts[0]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
@@ -438,8 +482,14 @@ async def test_album_coordinator_combines_media_group_into_one_prompt() -> None:
         await asyncio.sleep(0.08)
 
         assert len(session_manager.prompts) == 1
-        assert "Compare files" in session_manager.prompts[0]
-        assert "a.txt" in session_manager.prompts[0]
-        assert "b.txt" in session_manager.prompts[0]
+        lines = session_manager.prompts[0].splitlines()
+        assert lines[0] == "Compare files"
+        assert lines[1] == ""
+        assert len(lines) == 6
+        assert all(line.startswith("@{") for line in lines[2:])
+        assert any(line.endswith("/a.txt}") for line in lines[2:])
+        assert any(line.endswith("/a.txt.txt}") for line in lines[2:])
+        assert any(line.endswith("/b.txt}") for line in lines[2:])
+        assert any(line.endswith("/b.txt.txt}") for line in lines[2:])
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

@@ -63,8 +63,6 @@ class Config:
     attachment_download_timeout: int = 60
     attachment_retention_days: int = 7
     attachment_album_debounce_seconds: float = 1.0
-    attachment_resume_session: bool = False
-    attachment_image_model: str = "flash"
 
     # === Usage limits ===
     user_daily_token_limit: int = 0
@@ -241,14 +239,6 @@ class Config:
                     str(cls.attachment_album_debounce_seconds),
                 )
             ),
-            attachment_resume_session=_parse_bool(
-                os.getenv("ATTACHMENT_RESUME_SESSION"),
-                default=cls.attachment_resume_session,
-            ),
-            attachment_image_model=os.getenv(
-                "ATTACHMENT_IMAGE_MODEL",
-                cls.attachment_image_model,
-            ).strip(),
             user_daily_token_limit=int(
                 os.getenv(
                     "USER_DAILY_TOKEN_LIMIT",
@@ -323,8 +313,6 @@ class Config:
             "attachment_album_debounce_seconds": (
                 self.attachment_album_debounce_seconds
             ),
-            "attachment_resume_session": self.attachment_resume_session,
-            "attachment_image_model": self.attachment_image_model,
             "user_daily_token_limit": self.user_daily_token_limit,
             "global_daily_token_limit": self.global_daily_token_limit,
             "polling_timeout": self.polling_timeout,

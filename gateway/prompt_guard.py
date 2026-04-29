@@ -12,10 +12,6 @@ class PendingPrompt:
     chat_id: int
     prompt: str
     extra_include_directories: tuple[str, ...]
-    model_override: str | None
-    resume_session: bool
-    persist_session: bool
-    suppress_pre_tool_text: bool
     expires_at: float
 
 
@@ -33,10 +29,6 @@ class PendingPromptStore:
         prompt: str,
         ttl_seconds: int,
         extra_include_directories: tuple[str, ...] = (),
-        model_override: str | None = None,
-        resume_session: bool = True,
-        persist_session: bool = True,
-        suppress_pre_tool_text: bool = False,
     ) -> PendingPrompt:
         self.cleanup()
         token = uuid.uuid4().hex[:16]
@@ -46,10 +38,6 @@ class PendingPromptStore:
             chat_id=chat_id,
             prompt=prompt,
             extra_include_directories=tuple(extra_include_directories),
-            model_override=model_override,
-            resume_session=resume_session,
-            persist_session=persist_session,
-            suppress_pre_tool_text=suppress_pre_tool_text,
             expires_at=time.time() + max(1, ttl_seconds),
         )
         self._items[token] = item
