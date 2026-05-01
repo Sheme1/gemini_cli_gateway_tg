@@ -63,6 +63,8 @@ class Config:
     attachment_download_timeout: int = 60
     attachment_retention_days: int = 7
     attachment_album_debounce_seconds: float = 1.0
+    attachment_photo_max_side: int = 1024
+    attachment_photo_jpeg_quality: int = 85
 
     # === Usage limits ===
     user_daily_token_limit: int = 0
@@ -239,6 +241,21 @@ class Config:
                     str(cls.attachment_album_debounce_seconds),
                 )
             ),
+            attachment_photo_max_side=int(
+                os.getenv(
+                    "ATTACHMENT_PHOTO_MAX_SIDE",
+                    str(cls.attachment_photo_max_side),
+                )
+            ),
+            attachment_photo_jpeg_quality=_clamp_int(
+                os.getenv(
+                    "ATTACHMENT_PHOTO_JPEG_QUALITY",
+                    str(cls.attachment_photo_jpeg_quality),
+                ),
+                minimum=1,
+                maximum=95,
+                default=cls.attachment_photo_jpeg_quality,
+            ),
             user_daily_token_limit=int(
                 os.getenv(
                     "USER_DAILY_TOKEN_LIMIT",
@@ -313,6 +330,8 @@ class Config:
             "attachment_album_debounce_seconds": (
                 self.attachment_album_debounce_seconds
             ),
+            "attachment_photo_max_side": self.attachment_photo_max_side,
+            "attachment_photo_jpeg_quality": self.attachment_photo_jpeg_quality,
             "user_daily_token_limit": self.user_daily_token_limit,
             "global_daily_token_limit": self.global_daily_token_limit,
             "polling_timeout": self.polling_timeout,
@@ -422,6 +441,20 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     if value is None or not value.strip():
         return default
     return value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _clamp_int(
+    value: str | None,
+    *,
+    minimum: int,
+    maximum: int,
+    default: int,
+) -> int:
+    try:
+        parsed = int(value or "")
+    except ValueError:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def _load_env_file(env_path: Optional[str]) -> None:

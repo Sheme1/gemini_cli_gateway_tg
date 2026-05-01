@@ -86,6 +86,8 @@ class IncomingAttachment:
     original_name: str
     mime_type: str | None = None
     file_size: int | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,11 @@ class PreparedAttachment:
     file_size: int | None
     sha256: str
     sidecar_path: Path | None = None
+    prompt_path: Path | None = None
+
+    @property
+    def gemini_path(self) -> Path:
+        return self.prompt_path or self.saved_path
 
 
 @dataclass(frozen=True)
@@ -210,12 +217,21 @@ class AttachmentService:
         )
         actual_size = destination.stat().st_size
         file_hash = _sha256_file(destination)
+        prompt_path = prepare_attachment_for_gemini(
+            destination,
+            attachment=attachment,
+            config=self.config,
+        )
         sidecar_path = create_sidecar(destination, attachment.mime_type)
 
         logger.info(
-            "Attachment saved: kind=%s path=%s mime=%s size=%s sha256=%s sidecar=%s",
+            (
+                "Attachment saved: kind=%s path=%s prompt_path=%s mime=%s "
+                "size=%s sha256=%s sidecar=%s"
+            ),
             attachment.kind,
             destination.resolve(),
+            prompt_path.resolve() if prompt_path != destination else None,
             attachment.mime_type or "unknown",
             actual_size,
             file_hash,
@@ -230,6 +246,7 @@ class AttachmentService:
             file_size=file_size or actual_size,
             sha256=file_hash,
             sidecar_path=sidecar_path.resolve() if sidecar_path else None,
+            prompt_path=prompt_path.resolve() if prompt_path != destination else None,
         )
 
 
@@ -262,7 +279,7 @@ def build_attachment_prompt(
 ) -> str:
     attachment_lines: list[str] = []
     for attachment in attachments:
-        attachment_lines.append(f"@{{{_prompt_path(attachment.saved_path)}}}")
+        attachment_lines.append(f"@{{{_prompt_path(attachment.gemini_path)}}}")
         if attachment.sidecar_path is not None:
             attachment_lines.append(f"@{{{_prompt_path(attachment.sidecar_path)}}}")
 
@@ -327,6 +344,70 @@ def create_sidecar(path: Path, mime_type: str | None) -> Path | None:
     sidecar_path = path.with_name(f"{path.name}.txt")
     sidecar_path.write_text(text + "\n", encoding="utf-8")
     return sidecar_path
+
+
+def prepare_attachment_for_gemini(
+    path: Path,
+    *,
+    attachment: IncomingAttachment,
+    config: Config,
+) -> Path:
+    if attachment.kind != "photo" or config.attachment_photo_max_side <= 0:
+        return path
+
+    width = attachment.width or 0
+    height = attachment.height or 0
+    max_side = config.attachment_photo_max_side
+    if width > 0 and height > 0 and max(width, height) <= max_side:
+        return path
+
+    try:
+        from PIL import Image, ImageOps, UnidentifiedImageError
+    except ImportError:
+        logger.warning(
+            "Pillow is not installed; photo optimization skipped for %s",
+            path,
+        )
+        return path
+
+    try:
+        with Image.open(path) as source:
+            source.load()
+            original_size = source.size
+            if max(original_size) <= max_side:
+                return path
+
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            optimized_path = _dedupe_destination(
+                path.with_name(f"{path.stem}.gemini.jpg")
+            )
+            image.save(
+                optimized_path,
+                "JPEG",
+                quality=config.attachment_photo_jpeg_quality,
+                optimize=True,
+            )
+    except UnidentifiedImageError:
+        logger.warning("Photo optimization skipped for unreadable image %s", path)
+        return path
+    except Exception as exc:
+        logger.warning("Photo optimization failed for %s: %s", path, exc)
+        return path
+
+    logger.info(
+        "Photo optimized for Gemini: source=%s optimized=%s size=%s->%s bytes "
+        "dimensions=%s->%s max_side=%s quality=%s",
+        path.resolve(),
+        optimized_path.resolve(),
+        path.stat().st_size,
+        optimized_path.stat().st_size,
+        original_size,
+        image.size,
+        max_side,
+        config.attachment_photo_jpeg_quality,
+    )
+    return optimized_path
 
 
 def extract_docx_text(path: Path) -> str:
@@ -399,6 +480,8 @@ def _attachment_from_downloadable(kind: str, downloadable: Any) -> IncomingAttac
         original_name=str(original_name),
         mime_type=getattr(downloadable, "mime_type", None),
         file_size=getattr(downloadable, "file_size", None),
+        width=getattr(downloadable, "width", None),
+        height=getattr(downloadable, "height", None),
     )
 
 

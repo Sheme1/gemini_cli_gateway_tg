@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import shutil
 from pathlib import Path
@@ -7,6 +8,7 @@ import uuid
 import zipfile
 
 import pytest
+from PIL import Image
 
 from gateway.attachments import (
     AttachmentError,
@@ -178,6 +180,12 @@ def _docx_payload(text: str) -> bytes:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
+def _jpeg_payload(size: tuple[int, int] = (1200, 800)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color=(245, 245, 245)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
 def test_sanitize_filename_blocks_path_traversal_and_reserved_names() -> None:
     assert sanitize_filename("..\\../bad:name?.pdf", fallback="file") == "bad_name_.pdf"
     assert (
@@ -283,6 +291,8 @@ def test_collect_incoming_attachments_chooses_largest_photo() -> None:
             file_id="large",
             original_name="photo-l.jpg",
             file_size=20,
+            width=20,
+            height=20,
         )
     ]
 
@@ -417,6 +427,48 @@ async def test_process_attachment_photo_without_caption_uses_only_native_path() 
         assert "\n" not in prompt
         assert "Проанализируй" not in prompt
         assert session_manager.models == ["auto"]
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_process_large_photo_uses_optimized_copy_for_gemini() -> None:
+    tmp_path = make_test_dir()
+    try:
+        config = _config(tmp_path, attachment_photo_max_side=512)
+        bot = _AttachmentBot({"photo": _jpeg_payload((1200, 800))})
+        session_manager = _SessionManager()
+        dependencies = _AlbumDependencies(
+            bot=bot,
+            session_manager=session_manager,  # type: ignore[arg-type]
+            config=config,
+            user_settings=_UserSettings(),  # type: ignore[arg-type]
+            usage_ledger=None,  # type: ignore[arg-type]
+            prompt_guard=PendingPromptStore(),
+        )
+        message = _message(
+            caption="Что на фото?",
+            photo=[
+                SimpleNamespace(
+                    file_id="photo",
+                    file_unique_id="unique",
+                    file_size=1,
+                    width=1200,
+                    height=800,
+                )
+            ],
+        )
+
+        await process_attachment_messages([message], dependencies)
+
+        lines = session_manager.prompts[0].splitlines()
+        prompt_path = Path(lines[2][2:-1])
+        original_path = prompt_path.with_name("photo-unique.jpg")
+        assert prompt_path.name == "photo-unique.gemini.jpg"
+        assert original_path.exists()
+        assert prompt_path.exists()
+        with Image.open(prompt_path) as image:
+            assert max(image.size) == 512
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 

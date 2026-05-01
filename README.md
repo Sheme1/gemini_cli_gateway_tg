@@ -144,6 +144,8 @@ shell tooling requires it. Comma-separated values should not contain spaces.
 | `ATTACHMENT_DOWNLOAD_TIMEOUT` | No | Seconds to wait while downloading one Telegram attachment. |
 | `ATTACHMENT_RETENTION_DAYS` | No | Days to keep downloaded input files under `GATEWAY_STATE_DIR/uploads`. Defaults to `7`. |
 | `ATTACHMENT_ALBUM_DEBOUNCE_SECONDS` | No | Seconds to wait for the remaining Telegram media-group items before sending one combined Gemini prompt. |
+| `ATTACHMENT_PHOTO_MAX_SIDE` | No | Long side limit for Telegram photos passed to Gemini. Photos above this size are copied to an optimized JPEG; originals remain in uploads. Use `0` to disable. Defaults to `1024`. |
+| `ATTACHMENT_PHOTO_JPEG_QUALITY` | No | JPEG quality for optimized Telegram photo copies. Clamped to `1..95`. Defaults to `85`. |
 | `USER_DAILY_TOKEN_LIMIT` | No | Per-user daily token limit from Gemini result stats. `0` disables the limit. |
 | `GLOBAL_DAILY_TOKEN_LIMIT` | No | Global daily token limit from Gemini result stats. `0` disables the limit. |
 | `POLLING_TIMEOUT` | No | Telegram long-polling timeout passed to aiogram. |

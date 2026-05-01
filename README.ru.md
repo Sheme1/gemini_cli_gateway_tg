@@ -144,6 +144,8 @@ python -m gateway.main --doctor-json
 | `ATTACHMENT_DOWNLOAD_TIMEOUT` | Нет | Сколько секунд ждать скачивания одного Telegram-вложения. |
 | `ATTACHMENT_RETENTION_DAYS` | Нет | Сколько дней хранить скачанные входные файлы в `GATEWAY_STATE_DIR/uploads`. По умолчанию `7`. |
 | `ATTACHMENT_ALBUM_DEBOUNCE_SECONDS` | Нет | Сколько секунд ждать остальные элементы Telegram media group перед одним общим запросом в Gemini. |
+| `ATTACHMENT_PHOTO_MAX_SIDE` | Нет | Лимит длинной стороны Telegram-фото, которое передаётся в Gemini. Фото крупнее этого значения копируются в оптимизированный JPEG; оригиналы остаются в uploads. `0` отключает оптимизацию. По умолчанию `1024`. |
+| `ATTACHMENT_PHOTO_JPEG_QUALITY` | Нет | Качество JPEG для оптимизированных копий Telegram-фото. Ограничивается диапазоном `1..95`. По умолчанию `85`. |
 | `USER_DAILY_TOKEN_LIMIT` | Нет | Дневной лимит токенов на пользователя по result stats Gemini. `0` отключает лимит. |
 | `GLOBAL_DAILY_TOKEN_LIMIT` | Нет | Общий дневной лимит токенов по result stats Gemini. `0` отключает лимит. |
 | `POLLING_TIMEOUT` | Нет | Timeout long polling, который передаётся в aiogram. |
